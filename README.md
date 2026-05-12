@@ -36,6 +36,15 @@ Adjust `configs/simulation_config.json` (e.g. `num_requests`, `cache_capacity_mb
 - `results/` — metrics CSV, policy comparison, optional per-policy logs when you run `main.py`
 - `plots/` — bar charts for rates and latency breakdown
 
+## Repository
+
+Remote: `https://github.com/SanskarDhyani98/deadline-dccc-project`
+
+```bash
+git clone https://github.com/SanskarDhyani98/deadline-dccc-project.git
+cd deadline-dccc-project
+```
+
 ## License
 
 Add a `LICENSE` file if you plan to open-source this repository.

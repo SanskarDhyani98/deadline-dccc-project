@@ -49,3 +49,7 @@ This reads `configs/simulation_config.json`, runs all policies (LRU, LFU, DCCC_H
 - `plots/*.png` (matplotlib figures)
 
 Edit `configs/simulation_config.json` to change request counts, cache size, DRL hyperparameters, etc.
+
+## Checkpoints
+
+The `models_saved/` directory may contain `*.pt` weight files from training runs. Those files are **not** committed to Git (see `.gitignore`); regenerate them locally if your workflow saves agents there.
