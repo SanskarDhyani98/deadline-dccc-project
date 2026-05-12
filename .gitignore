@@ -20,3 +20,6 @@ results/*.log
 # Optional: uncomment to stop committing regenerated CSVs/plots
 # results/*.csv
 # plots/*.png
+
+# Trained checkpoint weights (regenerate with main.py / training)
+models_saved/*.pt
