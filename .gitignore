@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+
+# Large / bootstrap (not part of project source)
+get-pip.py
+
+# Generated run outputs (recreated by simulation)
+results/*.txt
+results/*.log
+
+# Optional: uncomment to stop committing regenerated CSVs/plots
+# results/*.csv
+# plots/*.png

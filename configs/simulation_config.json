@@ -1,0 +1,40 @@
+{
+    "num_edge_nodes": 5,
+    "num_regions": 3,
+    "num_contents": 120,
+  
+    "cache_capacity_mb": 9000,
+  
+    "strict_deadline_ms": 30,
+    "cooperative_deadline_ms": 70,
+  
+    "base_edge_latency_ms": 8,
+    "cloud_latency_ms": 120,
+  
+    "num_requests": 6000,
+  
+    "content_types": [
+      "video",
+      "image",
+      "iot",
+      "audio"
+    ],
+  
+    "policies": [
+      "LRU",
+      "LFU",
+      "DCCC_HASH",
+      "DEADLINE_DCCC"
+    ],
+  "drl_state_size": 7,
+  "drl_action_size": 5,
+  "drl_learning_rate": 0.001,
+  "drl_gamma": 0.95,
+  "drl_epsilon": 1.0,
+  "drl_epsilon_min": 0.05,
+  "drl_epsilon_decay": 0.97,
+  "drl_batch_size": 64,
+  "num_episodes": 50,
+"train_requests_per_episode": 1000,
+"eval_requests": 6000
+  }
