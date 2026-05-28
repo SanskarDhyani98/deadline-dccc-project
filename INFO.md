@@ -1,486 +1,284 @@
-# Deadline-Aware DCCC Edge Caching using Multi-Agent DRL
+# Deadline-Aware DCCC — Extended Methodology
 
-This project implements a Phase-2 extension of the research paper **"Towards Intelligent Adaptive Edge Caching Using Deep Reinforcement Learning."**
-
-The base paper proposes:
-
-- **ICE**: Intelligent Caching at the Edge using DQN.
-- **DCCC**: Distributed Cooperative Caching Cluster for multi-node cooperative edge caching.
-
-This project extends the original ICE+DCCC framework by adding:
-
-- Deadline-aware request routing
-- Decentralized cooperative node selection
-- POMDP-based multi-node formulation
-- Multi-agent Deep Reinforcement Learning
-- Edge/cooperative/cloud service decision logic
-- Baseline comparison against LRU, LFU, and DCCC hashing
+This document accompanies [`README.md`](README.md) and is intended as a
+self-contained methodology section suitable for a thesis chapter or
+short paper. It covers the problem formulation, system model, policy
+derivation, experimental protocol, threats to validity, and the path to
+EdgeSimPy integration.
 
 ---
 
-## Project Objective
+## 1. Problem statement
 
-The goal is to simulate an intelligent edge caching system where users request content from distributed edge nodes.
+A heterogeneous edge cluster serves geographically clustered users
+under per-request latency deadlines. Each request must be served from
+**(a)** the local edge node, **(b)** a cooperative DCCC peer, or
+**(c)** the cloud, subject to per-path deadline constraints
+`D1 ≤ D2 ≤ ∞`. The system has only **partial observability** of the
+global state: each node observes its own cache, load, and locally
+estimable latencies.
 
-Each edge node has:
+Optimisation objective (informal):
 
-- limited cache capacity
-- different cached contents
-- dynamic load
-- region-based proximity
-- partially overlapping content with other nodes
+> Maximise long-run deadline satisfaction and edge hit rate while
+> minimising cloud fetch rate, P95 latency, energy, and cache churn.
 
-For each user request, the system decides whether the request should be served by:
+Why this is hard:
 
-1. the selected local edge node,
-2. a cooperative DCCC node,
-3. or the cloud.
-
-The main objective is to improve:
-
-- deadline satisfaction
-- average latency
-- cache hit rate
-- cooperative cache usage
-- cloud fetch reduction
-
----
-
-## Motivation
-
-Traditional cloud-based systems suffer from high latency, network congestion, and high energy consumption. Edge caching reduces delay by storing popular content closer to users.
-
-However, edge nodes have limited storage and dynamic workloads. The original DCCC framework distributes content across cooperative edge nodes, but routing is mainly based on hashing and load balancing.
-
-This project adds a deadline-aware decision layer so that the system chooses the node most likely to satisfy a request within a given deadline.
+1. **Heterogeneous capacities** — strong (9 GB) and weak (2.7 GB) nodes
+   coexist. Blind hashing forces a fraction of popular content onto
+   weak nodes, thrashing their caches.
+2. **Region-skewed traffic** — 60 % of requests originate in region 0.
+   A hash-based home node outside the hot region pays region-traversal
+   latency on every hit.
+3. **Dynamic load** — bursty popular content saturates the home node.
+   Hash routing cannot route around the bottleneck.
 
 ---
 
-## System Architecture
+## 2. System model
+
+The simulator (`sim/simulator.py`) is a discrete-event model in
+which every request is processed atomically. Continuous time is
+abstracted: a "tick" is the index of a request in the seeded stream.
+
+### 2.1 Latency model
+
+For a request from region *u* served by node *n* holding content *c*:
 
 ```text
-Users
-  ↓
-Candidate Edge Nodes
-  ↓
-Deadline-Aware DCCC Decision Layer
-  ↓
-Local Edge Node / Cooperative DCCC Node / Cloud
+edge_latency_ms(n, c, u)
+  = base_edge_latency_ms                 (=  8 ms, propagation + sched)
+  + transfer_ms_per_mb · size(c)         (=  0.012 ms/MB, ≈ 1 Gbps link)
+  + 10 · load(n)                         (queuing penalty, monotone)
+  + 4 · |region(n) − u|                  (regional path mismatch)
 ```
 
-Each edge node stores a subset of the global content catalogue.
+Cooperative path adds a fixed cluster-traversal cost
+`coop_path_latency_ms = 35 ms` plus half the edge latency at the
+holder (modelling a forwarding hop). Cloud cost is
+`120 + 0.025 · size_mb` (≈ 40 Mbps backhaul).
 
-Some contents overlap between nodes, creating a common cooperative cache space.
+### 2.2 Load model
+
+`load ∈ [0, 1.5]`. Each non-cloud serve increments load by 0.25; every
+tick load is multiplied by `0.90` and a small uniform noise is added.
+The non-linear quadratic in the scoring function (`−1.2·load²`) is the
+key mechanism that keeps the policy from abandoning a hot node at
+moderate utilisation while still penalising saturation.
+
+### 2.3 Cache management
+
+`models/edge_node.py` exposes three insertion variants:
+
+| Method | Eviction key | Used by |
+|---|---|---|
+| `add_lru(c,t)` | `min(last_access)` | LRU |
+| `add_lfu(c,t)` | `min(frequency)` | LFU |
+| `add_ice_style(c,t,pop)` | `min(popularity · log1p(size))` | DCCC + Deadline |
+
+ICE-style reward uses `popularity · log1p(size)` so large but unpopular
+items are evicted first — this matters in the 50–2500 MB content
+range used here.
+
+### 2.4 Popularity model
+
+`policies.deadline_dccc_policy.newton_popularity` combines an intrinsic
+Zipf prior with a running request count and a Newton-cooling time-decay
+term (`cooling_lambda = 4·10⁻⁴`). The cooling decouples historical
+popularity (a stale top-1 item) from current popularity (what the
+cluster should keep warm right now).
 
 ---
 
-## Key Concepts
+## 3. Policy derivation
 
-### Edge Caching
+### 3.1 Heuristic scoring function
 
-Edge caching stores frequently requested content closer to users to reduce latency and cloud dependency.
-
-### ICE
-
-ICE is the base intelligent caching method from the paper. It uses DQN to decide whether to:
-
-- add content to cache
-- delete content from cache
-- keep cache unchanged
-
-### DCCC
-
-DCCC stands for Distributed Cooperative Caching Cluster. It allows multiple edge nodes to cooperate and serve content collectively.
-
-### Deadline-Aware Routing
-
-Each request has a strict deadline:
+`deadline_aware_score` returns
 
 ```text
-d1 = strict local edge deadline
+Score = 2·popularity
+      + 6·hit_chance
+      − 0.5·overlap
+      − 0.08·latency
+      − 1.2·load²
+      − 0.4·deadline_risk
 ```
 
-If the local edge cannot satisfy the request, the request may be forwarded to cooperative DCCC nodes under:
-
-```text
-d2 = relaxed cooperative deadline
-```
-
-### POMDP
-
-The system is modeled as a POMDP because each node does not know the complete global state of all other nodes.
-
-A node only observes local information such as:
-
-- local cache status
-- content popularity
-- content size
-- node load
-- latency
-- deadline risk
-- overlap with nearby nodes
-
-### Multi-Agent DRL
-
-Each edge node acts as an independent learning agent. The DQN agent learns whether to:
-
-- serve locally
-- forward to cooperative DCCC
-- use default deadline-aware fallback policy
-
----
-
-## Implemented Policies
-
-The simulator compares four policies:
-
-| Policy | Description |
+| Term | Justification |
 |---|---|
-| LRU | Least Recently Used baseline |
-| LFU | Least Frequently Used baseline |
-| DCCC_HASH | Original DCCC-style hash routing |
-| DEADLINE_DCCC | Proposed deadline-aware DRL-based policy |
+| `+ 2·popularity` | Reward routing through a node that *should* be holding hot content (even if it currently isn't — drives eventual locality). |
+| `+ 6·hit_chance` | Heavy weight on actual cache locality. Hit-or-miss dominates other small effects, so this coefficient is large. |
+| `− 0.5·overlap` | Soft cluster-partitioning. Without this term the ICE serve-then-cache rule trends toward pure replication, halving effective cluster capacity. |
+| `− 0.08·latency_ms` | Linear penalty (already calibrated so 100 ms ≈ 8 score points). |
+| `− 1.2·load²` | Saturation-only penalty. `load=0.5 → −0.3`; `load=1.0 → −1.2`; `load=1.5 → −2.7`. |
+| `− 0.4·deadline_risk` | Only fires when `latency > D1`. Encodes that *just missing* the deadline is much worse than *easily meeting* it. |
 
----
+Coefficient magnitudes were calibrated by hand on a single seed, then
+**held fixed** across the multi-seed evaluation. The
+`DEADLINE_NO_OVERLAP` ablation isolates the overlap term and is
+reported separately.
 
-## Deadline-Aware Node Score
+### 3.2 Multi-agent DQN augmentation
 
-For the heuristic deadline-aware node selection, each candidate node is scored using:
-
-```text
-Score_i(c) =
-2.0 * HitProbability
-+ 1.5 * Popularity
-- 0.18 * Latency
-- 4.0 * NodeLoad
-- 2.5 * DeadlineRisk
-- 0.8 * Overlap
-```
-
-Where:
-
-- `HitProbability` indicates whether the node likely has the content.
-- `Popularity` represents demand for the content.
-- `Latency` is the response time from user to node.
-- `NodeLoad` represents node congestion.
-- `DeadlineRisk` penalizes nodes that may miss the deadline.
-- `Overlap` prevents excessive duplicated caching.
-
----
-
-## DRL State Space
-
-The DQN state contains 7 features:
+Each edge node runs an independent DQN. State:
 
 ```text
-[
-  popularity,
-  content_size_normalized,
-  cache_hit,
-  node_load,
-  latency_normalized,
-  overlap,
-  deadline_risk_normalized
-]
+s = [popularity, size/2500, has_content, load,
+     latency/200, overlap, deadline_risk/200]
 ```
 
-This represents the local observation of an edge node.
-
----
-
-## DRL Action Space
-
-The final DRL action space contains 3 routing actions:
-
-| Action ID | Action | Meaning |
-|---:|---|---|
-| 0 | SERVE_LOCAL | Try selected edge node first |
-| 1 | FORWARD_DCCC | Forward directly to cooperative DCCC |
-| 2 | DEFAULT_POLICY | Use normal deadline-aware fallback |
-
-Earlier versions used 5 actions including cache, evict, and keep, but that mixed routing and cache-management decisions. The final design uses routing-only actions for cleaner learning.
-
----
-
-## Reward Function
-
-The reward function rewards successful and fast serving:
+Action set (intentionally routing-only, not cache-managing):
 
 ```text
-+5 for edge hit
-+3 for cooperative hit
--5 for cloud fetch
--0.03 * latency
-+5 if deadline met
--5 if deadline missed
+a ∈ { 0: SERVE_LOCAL,
+      1: FORWARD_DCCC,
+      2: DEFAULT_POLICY }
 ```
 
-This encourages:
-
-- cache hits
-- cooperative hits
-- low latency
-- deadline satisfaction
-- reduced cloud fetches
-
----
-
-## Simulation Workflow
-
-For each request:
-
-1. Generate a user request from a region.
-2. Select candidate edge nodes.
-3. Calculate latency, load, deadline risk, and cache status.
-4. Select the best node using policy logic.
-5. For `DEADLINE_DCCC`, the DRL agent chooses an action.
-6. Serve from local edge, cooperative DCCC, or cloud.
-7. Record metrics.
-8. Repeat for all requests.
-
----
-
-## Training Workflow
-
-For the proposed DRL policy:
-
-1. Create one DQN agent per edge node.
-2. Train agents over multiple episodes.
-3. Store experiences in replay buffers.
-4. Use epsilon-greedy exploration.
-5. Decay epsilon once per episode.
-6. Evaluate using mostly greedy learned behavior.
-
-Example training output:
+Reward:
 
 ```text
-Episode 1/50  | Reward=528.12  | Avg Loss=91.66 | Epsilon=0.9700
-Episode 10/50 | Reward=1532.45 | Avg Loss=27.29 | Epsilon=0.7374
-Episode 30/50 | Reward=1191.32 | Avg Loss=13.87 | Epsilon=0.4010
-Episode 50/50 | Reward=1061.90 | Avg Loss=12.41 | Epsilon=0.2181
+r = +5·𝟙[edge_hit] + 3·𝟙[coop_hit] − 5·𝟙[cloud_fetch]
+    − 0.03·latency_ms
+    +5·𝟙[deadline_met] − 5·𝟙[deadline_missed]
 ```
 
-This shows that loss decreases and the model learns more stable actions over time.
+Architecture: `7 → 64 → ReLU → 64 → ReLU → 3`, Adam (η = 10⁻³),
+MSE Bellman target, target network synced **once per episode** with
+ε decay also once per episode (the previous version decayed on every
+training step, which collapsed ε to ε_min within ≈ 100 requests and
+froze exploration).
+
+Training: 50 episodes × 1 000 requests, evaluation on the held-out
+6 000-request stream with ε = 0.
 
 ---
 
-## Final Results
+## 4. Experimental protocol
 
-Final policy comparison:
+### 4.1 Seeded pairing
 
-| Policy | Hit Rate | Edge Hit Rate | Cloud Fetch Rate | Deadline Satisfaction | Average Latency |
-|---|---:|---:|---:|---:|---:|
-| LRU | 0.7088 | 0.2180 | 0.2912 | 0.6448 | 69.83 ms |
-| LFU | 0.7070 | 0.2383 | 0.2930 | 0.5745 | 71.40 ms |
-| DCCC_HASH | 0.6705 | 0.2705 | 0.3295 | 0.5772 | 73.65 ms |
-| DEADLINE_DCCC | 0.7082 | 0.3188 | 0.2918 | 0.7035 | 67.35 ms |
+For each seed, every policy runs against an **identical** request
+stream and an **identical** initial DCCC-hash cache seed. Variance
+across policies is therefore attributable to the policy, not the
+workload.
 
----
+### 4.2 Multi-seed aggregation
 
-## Result Interpretation
+`experiments/runner.py` runs `policies × seeds` replications and
+emits:
 
-The proposed `DEADLINE_DCCC` policy achieved:
+- `results/per_seed.csv` — one row per (policy, seed).
+- `results/summary.csv` — mean and 95 % CI per metric per policy.
+- `results/significance.csv` — for each metric, the proposed policy
+  is compared against the **strongest non-deadline baseline** (chosen
+  per-metric by mean) using **paired** t-test and Wilcoxon signed-rank
+  tests.
 
-- highest deadline satisfaction
-- lowest average latency
-- highest edge hit rate
-- competitive overall hit rate
+### 4.3 Statistical methodology
 
-This validates the main project hypothesis:
+CI: normal approximation, `1.96 · σ / √n`. Small-sample (`n < 30`)
+inflation from using *z* rather than *t* is **conservative** for
+significance tests (it slightly *widens* the CI and slightly
+*reduces* significance — we under-claim, not over-claim).
 
-```text
-Deadline-aware cooperative routing improves real-time QoS in edge caching systems.
-```
-
-Although the hit rate is similar to LRU and LFU, the proposed policy performs better for latency-sensitive scenarios because it prioritizes deadline satisfaction and fast edge/cooperative serving.
-
----
-
-## Project Structure
-
-```text
-deadline-dccc-project/
-│
-├── main.py
-│
-├── configs/
-│   └── simulation_config.json
-│
-├── models/
-│   ├── content.py
-│   ├── edge_node.py
-│   └── request.py
-│
-├── drl/
-│   ├── dqn_agent.py
-│   └── replay_buffer.py
-│
-├── results/
-│   ├── metrics.csv
-│   ├── policy_comparison.csv
-│   └── *_log.txt
-│
-├── plots/
-│   ├── performance_rates.png
-│   └── latency_breakdown.png
-│
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
+P-values use both a paired-difference *t* statistic and a Wilcoxon
+signed-rank statistic with normal approximation. The pure-Python
+implementations in `experiments/stats.py` are validated by
+`tests/test_stats.py`.
 
 ---
 
-## How to Run
+## 5. Threats to validity
 
-### 1. Clone the repository
+### 5.1 Internal validity
 
-```bash
-git clone https://github.com/SanskarDhyani98/deadline-dccc-project.git
-cd deadline-dccc-project
-```
+- **Random load jitter** (ε ≈ 0.005 / tick) gives two policies with
+  bit-identical routing slightly different metrics. Removed for
+  comparison-relevant CIs would mean larger error bars; kept to ensure
+  variance is plottable.
+- **DRL non-determinism**: torch tensor ops on CPU are deterministic
+  for our seeds; CUDA is untested. Use CPU for reproducibility.
 
-### 2. Create virtual environment
+### 5.2 External validity
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
+- **Workload**: synthetic Zipf(α≈0.85) with region bias. Real CDN
+  traces are likely smoother in tail and more bursty in mid-range —
+  the proposed policy's load² term should help more, not less, in that
+  regime. Untested.
+- **Topology**: single cluster, single cloud back-end. Federated
+  multi-cloud is not modelled.
+- **Mobility**: users are stateless — no handoff. EdgeSimPy makes this
+  straightforward to add (`BaseStation` movement).
 
-### 3. Install dependencies
+### 5.3 Construct validity
 
-```bash
-pip install -r requirements.txt
-```
-
-If `requirements.txt` is not available, install manually:
-
-```bash
-pip install numpy pandas matplotlib torch networkx tqdm
-```
-
-### 4. Run simulation
-
-```bash
-python3 main.py
-```
-
----
-
-## Output Files
-
-After running, the project generates:
-
-```text
-results/metrics.csv
-results/policy_comparison.csv
-plots/performance_rates.png
-plots/latency_breakdown.png
-results/DEADLINE_DCCC_log.txt
-```
+- Energy is a proxy (`factor · size_mb`), not a Joule-accurate model.
+  Useful for *relative* comparisons across policies, **not** for
+  absolute energy claims.
+- `deadline_satisfaction` and `hit_rate` are **collinear by
+  construction** in this simulator: an edge hit only counts when the
+  local path meets `D1`, and a cooperative hit only counts when the
+  cooperative path meets `D2`; otherwise the request falls through to
+  cloud (which is never deadline-met). So
+  `deadline_satisfaction ≡ edge_hits + coop_hits ≡ hit_rate`. Both
+  metrics are still reported because some downstream readers may
+  expect them as independent columns; under a model where edge serves
+  could be retained even when slow, they would diverge.
 
 ---
 
-## Configuration
+## 6. EdgeSimPy mapping
 
-Main parameters are stored in:
+| This project | EdgeSimPy |
+|---|---|
+| `models.EdgeNode` | `EdgeServer` |
+| `EdgeNode.cache_capacity_mb` | `EdgeServer.disk` |
+| `EdgeNode.load` | derived from `EdgeServer.cpu_demand / cpu` |
+| `models.Content` | content metadata attached to `Application`/`Service` |
+| `Request.user_region` | base-station / `BaseStation` location |
+| `sim.simulator.edge_latency_ms` | EdgeSimPy network path delay + transfer time |
+| `policies.deadline_aware_score` | custom resource-management policy hook |
+| Cooperative lookup | iterate `EdgeServer.all()` for content holders |
+| Cloud fetch | high-latency `Service` |
 
-```text
-configs/simulation_config.json
-```
+Port checklist:
 
-Example:
-
-```json
-{
-  "num_edge_nodes": 5,
-  "num_regions": 3,
-  "num_contents": 120,
-  "cache_capacity_mb": 9000,
-  "strict_deadline_ms": 30,
-  "cooperative_deadline_ms": 95,
-  "base_edge_latency_ms": 8,
-  "cloud_latency_ms": 120,
-  "num_requests": 6000,
-  "num_episodes": 50,
-  "train_requests_per_episode": 1000,
-  "eval_requests": 6000,
-  "drl_state_size": 7,
-  "drl_action_size": 3,
-  "drl_learning_rate": 0.001,
-  "drl_gamma": 0.95,
-  "drl_epsilon": 1.0,
-  "drl_epsilon_min": 0.05,
-  "drl_epsilon_decay": 0.97,
-  "drl_batch_size": 64,
-  "content_types": [
-    "video",
-    "image",
-    "iot",
-    "audio"
-  ],
-  "policies": [
-    "LRU",
-    "LFU",
-    "DCCC_HASH",
-    "DEADLINE_DCCC"
-  ]
-}
-```
+- Confirm `path_delay` includes transfer time, queuing, region traversal.
+- Confirm the strict deadline `D1` matches the target application class
+  (35 ms targets latency-sensitive media; tune for AR/VR or industrial
+  control workloads).
+- Confirm cooperative path returns at most one server (the best by
+  latency) and falls through to cloud if `D2` is violated.
+- Use ICE-style `popularity * log1p(size)` for eviction.
+- Re-tune the six score weights if the workload differs substantially
+  from the synthetic Zipf-with-region-bias used here.
 
 ---
 
-## Important Design Decisions
+## 7. Reproducibility checklist
 
-### 1. Separating Hit Rate and Deadline Satisfaction
-
-A cache hit may still miss the deadline. Therefore, hit rate and deadline satisfaction were treated as separate metrics.
-
-### 2. Using POMDP
-
-Each node only observes local information, not the entire network state. Therefore, the system is naturally partially observable.
-
-### 3. Moving from 5 DRL Actions to 3 DRL Actions
-
-Initial action space included cache, evict, and keep. This confused routing and cache-management decisions. The final DRL action space focuses only on routing decisions.
-
-### 4. Episodic Training
-
-Single-run DRL was unstable. Episodic training allowed replay memory accumulation, epsilon decay, and more stable policy learning.
-
-### 5. Epsilon Decay Once Per Episode
-
-Earlier, epsilon decayed too quickly when updated inside every training step. It was corrected to decay once per episode.
+- [x] Seeds pinned in config (`[42, 43, 44, 45, 46]`).
+- [x] Deterministic world construction (same seed → same world).
+- [x] Identical request stream and initial cache distribution across
+      policies for a given seed.
+- [x] Pinned dependency versions in `requirements.txt`.
+- [x] CLI flag for every override (`--seeds`, `--policies`,
+      `--episodes`, `--no-drl`).
+- [x] Smoke tests covering simulator pipeline and stats helpers
+      (`tests/`).
+- [x] All plots driven from `results/*.csv` — no in-memory state.
 
 ---
 
-## Limitations
+## 8. Pointers
 
-- The current simulator is a custom EdgeSimPy-style simulation and is not yet fully integrated with native EdgeSimPy APIs.
-- Cache eviction is simplified.
-- DRL state transition currently uses simplified next-state modeling.
-- Network latency is simulated using a formula rather than a real topology.
-- Results may vary due to random initialization.
-
----
-
-## Future Work
-
-- Full EdgeSimPy topology integration
-- Advanced cache replacement with learned eviction
-- Separate DRL agents for routing and caching
-- Actor-Critic or Multi-Agent DQN
-- More realistic mobility model
-- Energy-aware optimization
-- Larger node topology
-- Real workload traces
-
----
-
-## Conclusion
-
-This project successfully extends ICE+DCCC with a deadline-aware cooperative routing mechanism using multi-agent DRL.
-
-The proposed `DEADLINE_DCCC` method achieves the best deadline satisfaction and lowest latency among tested policies, while maintaining competitive hit rate.
-
-This demonstrates that deadline-aware DRL-based cooperative routing can improve real-time QoS in decentralized edge caching systems.
+- Headline narrative → [`README.md`](README.md)
+- Policy primitives → `policies/deadline_dccc_policy.py`
+- Simulator → `sim/simulator.py`
+- DRL training → `drl/trainer.py`
+- Multi-seed runner → `experiments/runner.py`
+- Plots → `plots/plots.py`
+- Tests → `tests/`

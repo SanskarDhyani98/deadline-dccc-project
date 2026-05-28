@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- **Python** 3.9 or newer (3.10+ recommended)
-- **pip** current enough to install wheels for your platform
+- **Python** 3.10 or newer (3.13 verified)
+- **pip** recent enough to install wheels for your platform
 
 ## 1. Create a virtual environment
 
@@ -19,37 +19,53 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install pytest             # tests are optional
 ```
 
-### PyTorch
+### PyTorch (CUDA only)
 
-`requirements.txt` pulls **PyTorch** from PyPI. For a **CPU-only** machine this is usually enough. If you need a specific CUDA build, install PyTorch from the [official install matrix](https://pytorch.org/get-started/locally/) first, then install the rest:
+`requirements.txt` pulls **CPU PyTorch** from PyPI which is sufficient for
+this project — DRL training and evaluation both run on CPU in a few
+minutes. If you specifically need a CUDA build, install it from the
+[official install matrix](https://pytorch.org/get-started/locally/)
+first, then install the rest:
 
 ```bash
-pip install pandas matplotlib
+pip install pandas matplotlib numpy
 ```
 
 ## 3. Verify the environment
 
 ```bash
-python test_drl.py
+python -m pytest tests/        # 7 smoke tests, < 1 s
+python test_drl.py             # legacy DQN smoke check
 ```
 
-You should see a selected action, training loss, and `DRL test completed`.
+## 4. Run the experiments
 
-## 4. Run the full simulation
+Full reproduction (5 seeds, all 7 policies, 50 DRL episodes, ≈ 6 min on
+a 2024 MacBook Pro):
 
 ```bash
 python main.py
 ```
 
-This reads `configs/simulation_config.json`, runs all policies (LRU, LFU, DCCC_HASH, DEADLINE_DCCC), and writes:
+Quick smoke run (under a minute, no DRL training):
 
-- `results/*.csv` and per-policy logs (as configured)
-- `plots/*.png` (matplotlib figures)
+```bash
+python main.py --no-drl --seeds 42 --policies LRU LFU DCCC_HASH DEADLINE_HEURISTIC
+```
 
-Edit `configs/simulation_config.json` to change request counts, cache size, DRL hyperparameters, etc.
+Outputs land in `results/*.csv` (`per_seed`, `summary`,
+`significance`, optional `drl_training_history`) and `plots/*.png`.
+
+All knobs live in `configs/simulation_config.json` and can be
+overridden on the CLI with `--seeds`, `--policies`, `--episodes`,
+`--config`, `--output-dir`.
 
 ## Checkpoints
 
-The `models_saved/` directory may contain `*.pt` weight files from training runs. Those files are **not** committed to Git (see `.gitignore`); regenerate them locally if your workflow saves agents there.
+`models_saved/` holds per-seed DQN checkpoints written by
+`drl.trainer.save_agents` (call from a notebook if you want to
+checkpoint — `runner.py` retrains per seed by default and does not
+persist). The directory is git-ignored.

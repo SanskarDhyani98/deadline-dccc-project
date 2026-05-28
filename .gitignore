@@ -14,12 +14,10 @@ env/
 get-pip.py
 
 # Generated run outputs (recreated by simulation)
-results/*.txt
+results/*_log.txt
 results/*.log
-
-# Optional: uncomment to stop committing regenerated CSVs/plots
-# results/*.csv
-# plots/*.png
+results/si.txt
+results/x.txt
 
 # Trained checkpoint weights (regenerate with main.py / training)
 models_saved/*.pt
