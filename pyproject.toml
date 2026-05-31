@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "deadline-dccc"
+version = "0.1.0"
+description = "Deadline-aware cooperative edge caching simulator with multi-agent DRL"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "scipy>=1.11",
+]
+
+[project.scripts]
+deadline-dccc = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sim*", "drl*", "models*", "policies*", "experiments*", "plots*"]

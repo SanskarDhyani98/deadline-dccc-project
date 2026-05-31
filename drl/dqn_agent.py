@@ -20,14 +20,14 @@ from drl.replay_buffer import ReplayBuffer
 
 
 class DQNNetwork(nn.Module):
-    def __init__(self, state_size: int, action_size: int) -> None:
+    def __init__(self, state_size: int, action_size: int, hidden_size: int = 64) -> None:
         super().__init__()
         self.model = nn.Sequential(
-            nn.Linear(state_size, 64),
+            nn.Linear(state_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(64, action_size),
+            nn.Linear(hidden_size, action_size),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -45,6 +45,7 @@ class DQNAgent:
         epsilon_min: float = 0.05,
         epsilon_decay: float = 0.97,
         batch_size: int = 64,
+        hidden_size: int = 64,
         device: Optional[str] = None,
     ) -> None:
         self.state_size = state_size
@@ -57,8 +58,8 @@ class DQNAgent:
 
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.memory = ReplayBuffer()
-        self.policy_net = DQNNetwork(state_size, action_size).to(self.device)
-        self.target_net = DQNNetwork(state_size, action_size).to(self.device)
+        self.policy_net = DQNNetwork(state_size, action_size, hidden_size).to(self.device)
+        self.target_net = DQNNetwork(state_size, action_size, hidden_size).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
         self.loss_fn = nn.MSELoss()

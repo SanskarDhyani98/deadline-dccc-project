@@ -59,21 +59,29 @@ def make_agents(node_ids: List[int], config: dict) -> Dict[int, DQNAgent]:
             epsilon_min=config["drl_epsilon_min"],
             epsilon_decay=config["drl_epsilon_decay"],
             batch_size=config["drl_batch_size"],
+            hidden_size=config.get("drl_hidden_size", 64),
         )
         for nid in node_ids
     }
 
 
-def reward_for(hit_type: str, latency: float, deadline_met: bool) -> float:
+def reward_for(hit_type: str, latency: float, deadline_met: bool, config=None) -> float:
+    cfg = config or {}
+    r_edge = cfg.get("reward_edge_hit", 5.0)
+    r_coop = cfg.get("reward_coop_hit", 3.0)
+    r_cloud = cfg.get("reward_cloud_penalty", 5.0)
+    r_lat_coef = cfg.get("reward_latency_coef", 0.03)
+    r_deadline = cfg.get("reward_deadline_bonus", 5.0)
+
     reward = 0.0
     if hit_type == "edge":
-        reward += 5.0
+        reward += r_edge
     elif hit_type == "cooperative":
-        reward += 3.0
+        reward += r_coop
     elif hit_type == "cloud":
-        reward -= 5.0
-    reward -= 0.03 * latency
-    reward += 5.0 if deadline_met else -5.0
+        reward -= r_cloud
+    reward -= r_lat_coef * latency
+    reward += r_deadline if deadline_met else -r_deadline
     return reward
 
 
@@ -123,7 +131,7 @@ def train_drl_agents(seed: int, config: dict, verbose: bool = True) -> tuple[Dic
                 return
             state = last_state.pop(served_id)
             action = last_action.pop(served_id)
-            r = reward_for(record["hit_type"], record["latency_ms"], record["deadline_met"])
+            r = reward_for(record["hit_type"], record["latency_ms"], record["deadline_met"], config=config)
             rewards += r
             # next_state ≈ state (we don't model true next state)
             agents[served_id].remember(state, action, r, state, False)

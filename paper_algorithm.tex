@@ -1,0 +1,924 @@
+% =========================================================================
+% Deadline-Aware Multi-Agent Deep Reinforcement Learning for
+% Cooperative Edge Caching under Partial Observability
+%
+% IEEE Conference Paper — IEEEtran class
+% =========================================================================
+\documentclass[conference]{IEEEtran}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{array}
+\usepackage{multirow}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+% =========================================================================
+\title{Deadline-Aware Multi-Agent Deep Reinforcement Learning for
+       Cooperative Edge Caching under Partial Observability}
+
+\author{
+  \IEEEauthorblockN{Sanskar Dhyani, Soniya, Shiv Sunder Behera}
+  \IEEEauthorblockA{Department of Computer Science and Engineering \\
+    Dr.\ B.\ R.\ Ambedkar National Institute of Technology Jalandhar \\
+    Jalandhar, Punjab, India}
+  \\[4pt]
+  \IEEEauthorblockN{\textit{Supervisor: Dr.\ Someshula Manoj Kumar}}
+  \IEEEauthorblockA{Department of Computer Science and Engineering \\
+    Dr.\ B.\ R.\ Ambedkar National Institute of Technology Jalandhar \\
+    Jalandhar, Punjab, India}
+}
+
+\begin{document}
+\maketitle
+
+% =========================================================================
+\begin{abstract}
+Edge computing networks must serve heterogeneous content workloads
+under strict latency deadlines while operating with only partial
+knowledge of the global system state.  Existing deep reinforcement
+learning (DRL) caching approaches, such as the Intelligent Caching at
+the Edge (ICE) framework, assume a single centralised agent with full
+Markov-state visibility and static Zipf popularity—assumptions that do
+not hold in realistic distributed deployments.  We present
+\emph{DEADLINE\_DCCC}, a Deadline-Aware Cooperative Caching framework
+that replaces these assumptions with (i)~a Partially Observable Markov
+Decision Process (POMDP) formulation in which each edge node maintains
+an independent DQN agent acting on a seven-dimensional local
+observation, (ii)~a Newton-cooling popularity model that captures both
+historical and recency-weighted demand, and (iii)~a six-term
+deadline-aware scoring function that jointly optimises cache locality,
+load balance, content replication overlap, path latency, and deadline
+risk.  Evaluation on a heterogeneous five-node cluster (capacities
+$[9,9,2.7,9,2.7]$\,GB) over 6\,000 requests with region-skewed Zipf
+traffic achieves a 54.5\% hit rate, a 54.5\% deadline satisfaction
+rate, and an average end-to-end latency of 87.06\,ms, with
+P95\,=\,175.4\,ms.
+\end{abstract}
+
+\begin{IEEEkeywords}
+edge caching, deep reinforcement learning, cooperative caching,
+partial observability, POMDP, deadline-aware routing, multi-agent
+systems, content delivery networks
+\end{IEEEkeywords}
+
+% =========================================================================
+\section{Introduction}
+\label{sec:intro}
+
+The proliferation of latency-sensitive applications—live video
+streaming, augmented reality, industrial IoT, and remote healthcare—
+has driven substantial research interest in \emph{mobile edge
+computing} (MEC), where computation and storage resources are pushed to
+the network periphery~\cite{shi2016edge}.  Content Delivery Networks
+(CDNs) increasingly rely on cooperative edge caches to reduce
+backbone traffic and guarantee quality-of-service (QoS) targets
+expressed as per-request latency deadlines.
+
+Traditional caching policies such as Least Recently Used (LRU) and
+Least Frequently Used (LFU) are agnostic to content popularity
+dynamics and network topology.  Machine learning approaches, and
+particularly deep reinforcement learning (DRL), have been applied to
+learn adaptive caching policies directly from interactions with the
+system~\cite{sadeghi2019optimal,zhong2020deep}.  The ICE framework
+~\cite{ice2022} proposed a single DQN agent operating on a global MDP
+state to jointly control content placement and eviction, demonstrating
+significant improvements in hit rate and energy consumption over static
+baselines.
+
+However, ICE and similar single-agent approaches suffer from three
+structural limitations when deployed in realistic distributed edge
+networks.  First, \emph{centralised state} is expensive to maintain:
+aggregating cache inventories, load levels, and latency measurements
+from all nodes requires constant inter-node signalling that itself
+consumes bandwidth and introduces staleness~\cite{liu2019decentralised}.
+Second, \emph{static popularity models} (Zipf with fixed exponent) fail
+to track content lifecycle: viral items spike rapidly and cool off,
+whereas long-tail items maintain baseline demand for extended
+periods~\cite{traverso2013temporal}.  Third, existing formulations
+ignore \emph{per-request deadlines}, which are increasingly mandated by
+service-level agreements for real-time applications.
+
+This paper presents \emph{DEADLINE\_DCCC} (Deadline-aware
+Decentralised Cooperative Caching with DRL), which addresses all three
+limitations.  Our contributions are:
+
+\begin{enumerate}
+  \item A POMDP formulation in which each edge node $i$ maintains an
+    independent DQN agent observing only a seven-dimensional local
+    state vector, eliminating the need for global state
+    synchronisation.
+  \item A Newton-cooling popularity model that blends Zipf-prior
+    popularity with a time-decaying request count, providing a
+    dynamically recency-weighted demand signal.
+  \item A six-term deadline-aware scoring function that simultaneously
+    accounts for cache locality, content overlap, path latency,
+    quadratic load cost, and residual deadline risk.
+  \item A two-tier routing architecture ($\mathrm{edge} \to
+    \mathrm{cooperative} \to \mathrm{cloud}$) with strict
+    ($D_1 = 35$\,ms) and cooperative ($D_2 = 95$\,ms) deadline tiers.
+  \item An empirical evaluation over heterogeneous node capacities and
+    region-skewed traffic showing competitive hit rates alongside
+    explicit deadline satisfaction reporting.
+\end{enumerate}
+
+The remainder of the paper is organised as follows.  Section~\ref{sec:related}
+reviews related work.  Section~\ref{sec:model} describes the system
+model.  Section~\ref{sec:pomdp} provides the POMDP formulation.
+Section~\ref{sec:algorithm} presents the DEADLINE\_DCCC algorithm.
+Section~\ref{sec:differences} explicitly compares our approach to the
+ICE base paper.  Section~\ref{sec:eval} reports experimental results.
+Section~\ref{sec:conclusion} concludes.
+
+% =========================================================================
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Adaptive Edge Caching with DRL}
+
+Sadeghi et al.~\cite{sadeghi2019optimal} showed that model-free DRL can
+learn near-optimal caching policies without explicit knowledge of
+content popularity distributions, outperforming classical replacement
+rules on synthetic and real traces.  Zhong et al.~\cite{zhong2020deep}
+applied DQN to proactive caching in heterogeneous networks, exploiting
+temporal patterns in user requests to pre-populate caches before demand
+peaks.
+
+The ICE framework~\cite{ice2022} unified placement, eviction, and
+routing decisions under a single DQN trained on an MDP with global
+edge-state observations.  ICE introduced the \emph{ICE reward}
+(popularity $\times$ $\log(1 + \mathrm{size})$) as an eviction metric
+that favours retaining large popular items and demonstrated that
+DRL-based policies outperform LRU and LFU on hit rate and energy across
+a range of Zipf exponents.  Our work builds directly on ICE's reward
+formulation but extends it to the multi-agent, deadline-constrained
+setting.
+
+\subsection{Cooperative Caching}
+
+Content replication across cooperative edge nodes can multiply
+effective cache capacity, but naive replication wastes space and
+saturates inter-node links~\cite{borst2010distributed}.  Femtocaching
+~\cite{golrezaei2013femtocaching} showed analytically that cooperative
+caching across small-cell base stations can dramatically reduce
+backhaul load.  More recent work has applied multi-agent RL to
+cooperative caching~\cite{zheng2018heterogeneous}, but typically
+assumes homogeneous node capacity and ignores the partial observability
+problem.  We explicitly model heterogeneous capacity
+($[9,9,2.7,9,2.7]$\,GB) and penalise redundant replication through the
+overlap term in our scoring function.
+
+\subsection{Partial Observability in Multi-Agent RL}
+
+The Partially Observable Markov Decision Process (POMDP) provides the
+correct theoretical framework when agents cannot observe the full system
+state~\cite{kaelbling1998planning}.  Lowe et al.~\cite{lowe2017multi}
+introduced the \emph{centralised training, decentralised execution}
+(CTDE) paradigm; however, their approach still requires sharing agent
+observations at training time.  Our system avoids inter-agent
+communication entirely during both training and execution, making it
+suitable for deployments where nodes may belong to different
+administrative domains.
+
+\subsection{Deadline-Aware Content Delivery}
+
+Meeting per-request latency deadlines has been studied in the
+real-time scheduling literature~\cite{buttazzo2011hard}, but its
+integration with learning-based caching is limited.  Xu
+et al.~\cite{xu2019joint} considered joint offloading and caching with
+delay constraints in MEC, while Liu et al.~\cite{liu2020deadline}
+proposed deadline-constrained task scheduling on edge servers.  Neither
+work addresses content popularity dynamics or multi-tier cooperative
+routing.  DEADLINE\_DCCC closes this gap by embedding deadline risk
+directly into the node-selection score and the DRL reward.
+
+% =========================================================================
+\section{System Model}
+\label{sec:model}
+
+\subsection{Network Topology}
+
+We consider a three-tier content delivery infrastructure: a cloud
+origin server, an edge cluster of $N = 5$ heterogeneous edge nodes
+$\mathcal{N} = \{n_0, n_1, n_2, n_3, n_4\}$, and a population of
+users organised into $R = 3$ geographic regions.  Edge nodes are
+connected to each other via a low-latency intra-cluster fabric and to
+the cloud via a higher-latency backhaul link.  Nodes $n_0, n_1, n_3$
+each have a storage capacity of 9\,GB, while $n_2$ and $n_4$ have
+2.7\,GB each, reflecting the heterogeneous hardware typical of real
+edge deployments.
+
+\subsection{Latency Model}
+
+For a request from region $u$ served locally by node $n$ holding
+content $c$ of size $s_c$\,MB, the edge delivery latency is
+
+\begin{equation}
+  \ell_{\mathrm{edge}}(n,c,u) =
+    \ell_{\mathrm{base}}
+    + \alpha_{\mathrm{tx}} \cdot s_c
+    + \alpha_{\mathrm{load}} \cdot \mathrm{load}(n)
+    + \alpha_{\mathrm{region}} \cdot |r(n) - u|,
+  \label{eq:latency}
+\end{equation}
+
+where $\ell_{\mathrm{base}} = 8$\,ms is the base propagation and
+scheduling cost, $\alpha_{\mathrm{tx}} = 0.012$\,ms/MB models a
+1\,Gbps edge link, $\alpha_{\mathrm{load}} = 10$\,ms is a queuing
+penalty, and $\alpha_{\mathrm{region}} = 4$\,ms/hop penalises
+cross-region traversal.  The load $\mathrm{load}(n) \in [0, 1.5]$ is
+a continuous variable updated after each request.
+
+Cooperative serving from a peer node $n'$ incurs an additional fixed
+cluster-traversal cost $\ell_{\mathrm{coop}} = 35$\,ms plus half the
+local edge latency at the holder:
+$\ell_{\mathrm{cooperative}}(n') = \ell_{\mathrm{coop}} +
+\frac{1}{2}\ell_{\mathrm{edge}}(n',c,u)$.
+
+Cloud fetching costs $\ell_{\mathrm{cloud}}(c) = 120 + 0.025 \cdot s_c$
+ms, reflecting a slower 40\,Mbps backhaul link.
+
+\subsection{Load Dynamics}
+
+Each non-cloud serve increments the serving node's load by 0.25.
+After every request, loads are decayed by a factor of 0.9 and a small
+uniform noise $\epsilon \sim \mathcal{U}(-0.005, 0.005)$ is added to
+model background variability:
+
+\begin{equation}
+  \mathrm{load}(n, t+1) = 0.9 \cdot \mathrm{load}(n, t) + 0.25 \cdot
+  \mathbf{1}[\text{served by } n] + \epsilon.
+  \label{eq:load}
+\end{equation}
+
+\subsection{Content Model and Newton-Cooling Popularity}
+
+The content catalogue consists of $M = 120$ items drawn from four
+types: video, image, IoT, and audio.  Content sizes are uniformly
+distributed in $[50, 2500]$\,MB.  Each item $c$ has a base Zipf
+popularity $\rho_c$ with exponent $\alpha_z = 0.85$ and a region
+affinity bias in $[0.1, 1.0]$.
+
+To capture the lifecycle of content demand, we introduce a
+\emph{Newton-cooling popularity} model that blends the Zipf prior with
+a decaying request-count signal:
+
+\begin{equation}
+  p_c(t) = \left(\rho_c + \frac{q_c(t)}{20}\right) e^{-\lambda t},
+  \label{eq:newton}
+\end{equation}
+
+where $q_c(t)$ is the cumulative request count for content $c$ up to
+time $t$ and $\lambda = 4 \times 10^{-4}$ is the cooling coefficient.
+This formulation ensures that (i)~recently requested content benefits
+from a positive $q_c$ boost, and (ii)~all content eventually cools,
+preventing the cache from permanently favouring stale popular items.
+The ICE-style eviction metric $\rho_c \cdot \log(1 + s_c)$ is then
+evaluated using $p_c(t)$ in place of the static popularity.
+
+\subsection{Traffic Model}
+
+Requests arrive according to a Zipf distribution over contents
+conditioned on the user's region.  Region weights are
+$[0.60, 0.25, 0.15]$, modelling a hot primary region, a moderate
+secondary region, and a light tertiary region.  A cross-region
+probability of 0.35 models users who occasionally request content
+hosted in a different region.  The request stream is seeded for
+reproducibility; all policies are evaluated against an identical
+stream.
+
+\subsection{Deadline Tiers}
+
+Two latency deadline tiers are defined:
+\begin{itemize}
+  \item \textbf{Strict edge deadline} $D_1 = 35$\,ms: content that
+    can be served locally within this budget.
+  \item \textbf{Cooperative deadline} $D_2 = 95$\,ms: content that
+    can be served via a cooperative peer within this budget.
+\end{itemize}
+Any request whose end-to-end latency exceeds $D_2$ triggers a cloud
+fetch, which is never considered deadline-satisfying.
+
+% =========================================================================
+\section{Problem Formulation}
+\label{sec:pomdp}
+
+\subsection{Limitations of the MDP Assumption}
+
+The ICE framework~\cite{ice2022} models the caching problem as a
+standard Markov Decision Process, where a single agent observes the
+full global state including all node caches, load levels, and
+content popularity counters.  While this simplifies training, the MDP
+assumption breaks down in practice because (i)~global state collection
+incurs $O(N \cdot M)$ inter-node communication per request, (ii)~the
+centralised agent becomes a single point of failure, and (iii)~the
+state space scales prohibitively with cluster size.
+
+\subsection{POMDP Formulation}
+
+We model the cooperative caching problem as a \emph{Partially
+Observable Markov Decision Process} (POMDP), defined by the tuple
+$\langle \mathcal{S}, \mathcal{A}, \mathcal{T}, \mathcal{R},
+\mathcal{O}, \mathcal{Z}, \gamma \rangle$:
+
+\begin{itemize}
+  \item \textbf{State space} $\mathcal{S}$: The full system state at
+    time $t$ comprises the cache contents of all nodes, their load
+    vectors, and the current popularity estimates for all content items.
+    This state is \emph{not} fully observed by any single agent.
+
+  \item \textbf{Observation space} $\mathcal{O}$: Agent $i$ at node
+    $n_i$ observes the seven-dimensional local observation vector
+    $\mathbf{o}_i(t) \in [0,1]^7$ defined as:
+    \begin{equation}
+      \mathbf{o}_i(t) = \Bigl[
+        \rho_c,\;
+        \tfrac{s_c}{2500},\;
+        h_i,\;
+        \mathrm{load}_i,\;
+        \tfrac{\ell_i}{200},\;
+        \Omega_i,\;
+        \tfrac{\max(0,\ell_i - D_1)}{200}
+      \Bigr],
+      \label{eq:obs}
+    \end{equation}
+    where $\rho_c$ is the base Zipf popularity of the requested content,
+    $s_c$ is its size in MB normalised by the maximum (2500\,MB),
+    $h_i \in \{0,1\}$ indicates whether node $n_i$ currently holds
+    the content, $\mathrm{load}_i$ is the node's current load,
+    $\ell_i$ is the estimated edge delivery latency normalised by
+    200\,ms, $\Omega_i$ is the cache overlap ratio (defined in
+    Section~\ref{sec:algorithm}), and the final term is the deadline
+    risk normalised by 200\,ms.
+
+  \item \textbf{Action space} $\mathcal{A}$: Each agent selects from
+    three routing actions:
+    \begin{equation}
+      \mathcal{A} = \{0: \textsc{serve\_local},\;
+                       1: \textsc{forward\_dccc},\;
+                       2: \textsc{default\_policy}\}.
+    \end{equation}
+    \textsc{serve\_local} routes the request to the local node.
+    \textsc{forward\_dccc} triggers cooperative peer scoring.
+    \textsc{default\_policy} delegates to the deterministic
+    deadline-aware scoring heuristic.
+
+  \item \textbf{Transition model} $\mathcal{T}$: Transitions are
+    \emph{partially known} to each agent.  The agent can estimate its
+    own cache state, load, and latency, but cannot observe changes to
+    peer nodes' caches induced by other requests handled elsewhere in
+    the cluster.
+
+  \item \textbf{Reward function} $\mathcal{R}$: The scalar reward
+    received by the agent responsible for routing request $r$ is:
+    \begin{equation}
+      \mathcal{R}(s, a) =
+        r_{\mathrm{hit}}
+        - 0.03 \cdot \ell_r
+        + 5 \cdot \mathbf{1}[\ell_r \leq D_{\mathrm{tier}}]
+        - 5 \cdot \mathbf{1}[\ell_r > D_{\mathrm{tier}}],
+      \label{eq:reward}
+    \end{equation}
+    where $r_{\mathrm{hit}} \in \{+5, +3, -5\}$ for edge hit,
+    cooperative hit, and cloud fetch respectively, $\ell_r$ is the
+    realised latency in milliseconds, and $D_{\mathrm{tier}}$ is the
+    applicable deadline ($D_1$ or $D_2$).
+
+  \item \textbf{Discount factor} $\gamma = 0.95$: Balances immediate
+    latency penalties against long-term cache placement benefits.
+\end{itemize}
+
+\subsection{Decoupled Multi-Agent Training}
+
+Five independent DQN agents are trained simultaneously, one per node.
+Each agent observes only its own local state and receives its own
+scalar reward.  Agents do not share parameters or communicate during
+training.  This constitutes a \emph{decentralised execution and
+decentralised training} (DEDT) paradigm, which is more restrictive than
+the CTDE paradigm of MADDPG~\cite{lowe2017multi} but avoids the need
+for an inter-agent communication channel entirely.  The independence
+assumption is justified because each node's routing decision
+predominantly depends on its own cache state and load, with only a weak
+coupling through cooperative serving paths.
+
+% =========================================================================
+\section{Proposed Algorithm: DEADLINE\_DCCC}
+\label{sec:algorithm}
+
+\subsection{Six-Term Deadline-Aware Scoring Function}
+
+The core contribution of this paper is the \emph{deadline-aware
+scoring function} used to select the best edge node for each request.
+For node $n$, content $c$, and user region $u$, the score is:
+
+\begin{equation}
+  \sigma(n, c, u) =
+    \underbrace{2.0 \cdot p_c(t)}_{\text{popularity}}
+    + \underbrace{6.0 \cdot \chi(n, c)}_{\text{cache hit}}
+    - \underbrace{0.5 \cdot \Omega_n}_{\text{overlap}}
+    - \underbrace{0.08 \cdot \ell(n,c,u)}_{\text{latency}}
+    - \underbrace{1.2 \cdot \mathrm{load}(n)^2}_{\text{load}}
+    - \underbrace{0.4 \cdot \delta(n,c,u)}_{\text{deadline risk}},
+  \label{eq:score}
+\end{equation}
+
+where:
+\begin{itemize}
+  \item $p_c(t)$ is the Newton-cooling popularity (Eq.~\ref{eq:newton}).
+  \item $\chi(n,c) = 1.0$ if $n$ currently holds content $c$, otherwise
+    $\min(0.5, p_c(t))$.  This term strongly rewards routing to a node
+    that already caches the content while still providing a
+    popularity-proportional incentive for nodes without it.
+  \item $\Omega_n = |\mathcal{C}_n \cap \mathcal{C}_{-n}| /
+    \max(1, |\mathcal{C}_n|)$ is the \emph{cache overlap ratio}: the
+    fraction of node $n$'s cache contents that are also held by at
+    least one other cluster node.  Penalising overlap encourages
+    \emph{soft partitioning}, increasing effective cluster capacity.
+  \item $\ell(n, c, u)$ is the estimated edge delivery latency
+    (Eq.~\ref{eq:latency}).
+  \item $\mathrm{load}(n) \in [0, 1.5]$ is the node's current load.
+    The quadratic term $\mathrm{load}^2$ applies a negligible penalty
+    at moderate utilisation ($\mathrm{load}=0.5 \Rightarrow -0.3$
+    points) but a strong penalty at saturation ($\mathrm{load}=1.5
+    \Rightarrow -2.7$ points), enabling the policy to route around
+    overloaded nodes without abandoning lightly loaded ones.
+  \item $\delta(n,c,u) = \max(0, \ell(n,c,u) - D_1)$ is the residual
+    deadline risk, only active when the estimated latency exceeds the
+    strict deadline $D_1 = 35$\,ms.
+\end{itemize}
+
+The coefficient magnitudes were calibrated on a single seed (seed 42)
+and held fixed across all evaluation seeds to prevent overfitting to
+the training distribution.  An ablation variant \textsc{deadline\_no\_overlap}
+removes the $\Omega_n$ term to isolate the contribution of the
+overlap penalty.
+
+\subsection{Two-Tier Routing Protocol}
+
+Algorithm~\ref{alg:routing} describes the complete DEADLINE\_DCCC
+routing decision for an incoming request.
+
+\begin{algorithm}[t]
+\caption{DEADLINE\_DCCC Routing Decision}
+\label{alg:routing}
+\begin{algorithmic}[1]
+\Require request $(c, u)$, edge cluster $\mathcal{N}$, deadlines $D_1, D_2$,
+         DQN agents $\{\pi_i\}_{i \in \mathcal{N}}$, time step $t$
+\Ensure  served latency $\ell$, hit type $h$
+
+\State $n_{\mathrm{local}} \leftarrow$ home node for region $u$
+\State $\mathbf{o} \leftarrow$ \Call{BuildObservation}{$n_{\mathrm{local}}$, $c$, $t$}
+\State $a \leftarrow \pi_{n_{\mathrm{local}}}(\mathbf{o})$ \Comment{DQN action}
+
+\If{$a = \textsc{serve\_local}$ \textbf{or} $n_{\mathrm{local}}.\mathrm{has}(c)$}
+  \State $\ell \leftarrow \ell_{\mathrm{edge}}(n_{\mathrm{local}}, c, u)$
+  \If{$\ell \leq D_1$}
+    \State \Return $\ell$, \textsc{edge\_hit}
+  \EndIf
+\EndIf
+
+\If{$a = \textsc{forward\_dccc}$ \textbf{or} $a = \textsc{default\_policy}$}
+  \State $p_c \leftarrow$ \Call{NewtonPopularity}{$c$, $t$}
+  \For{each node $n \in \mathcal{N}$}
+    \State $\Omega_n \leftarrow$ \Call{CacheOverlap}{$n$, $\mathcal{N}$}
+    \State $\ell_n \leftarrow \ell_{\mathrm{edge}}(n, c, u)$
+    \State $\sigma_n \leftarrow$ \Call{DeadlineScore}{$n$, $c$, $p_c$, $\ell_n$, $\Omega_n$, $D_1$}
+  \EndFor
+  \State $n^* \leftarrow \arg\max_{n \in \mathcal{N}} \sigma_n$
+  \State $\ell \leftarrow \ell_{\mathrm{cooperative}}(n^*)$
+  \If{$\ell \leq D_2$}
+    \If{$n^*.\mathrm{has}(c)$}
+      \State \Return $\ell$, \textsc{coop\_hit}
+    \Else
+      \State \Call{ICEEvict}{$n^*$, $c$, $p_c$} \Comment{Cache content at best node}
+      \State \Return $\ell$, \textsc{coop\_hit}
+    \EndIf
+  \EndIf
+\EndIf
+
+\State $\ell \leftarrow \ell_{\mathrm{cloud}}(c)$
+\State \Return $\ell$, \textsc{cloud\_fetch}
+
+\Statex
+\Function{DeadlineScore}{$n$, $c$, $p_c$, $\ell_n$, $\Omega_n$, $D_1$}
+  \State $\chi \leftarrow 1.0$ if $n.\mathrm{has}(c)$ else $\min(0.5, p_c)$
+  \State $\delta \leftarrow \max(0, \ell_n - D_1)$
+  \State \Return $2.0 p_c + 6.0 \chi - 0.5 \Omega_n - 0.08 \ell_n
+                  - 1.2 \cdot n.\mathrm{load}^2 - 0.4 \delta$
+\EndFunction
+\Statex
+\Function{ICEEvict}{$n$, $c$, $p_c$}
+  \If{$n.\mathrm{cache}$ is full}
+    \State $c' \leftarrow \arg\min_{x \in n.\mathrm{cache}}\; p_x(t) \cdot
+           \log(1 + s_x)$
+    \State Evict $c'$ from $n$
+  \EndIf
+  \State Insert $c$ into $n.\mathrm{cache}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Independent DQN Agents}
+
+Each node $n_i$ maintains a DQN with the architecture
+$7 \to 64 \to \mathrm{ReLU} \to 64 \to \mathrm{ReLU} \to 3$.  The
+policy network $Q(s, a;\,\theta_i)$ and a periodically synchronised
+target network $Q(s, a;\,\theta_i^-)$ are used to compute the
+Bellman target:
+
+\begin{equation}
+  y_j = r_j + \gamma \max_{a'} Q(s'_j, a';\,\theta_i^-),
+  \label{eq:bellman}
+\end{equation}
+
+and the MSE loss $\mathcal{L}(\theta_i) = \mathbb{E}\bigl[(y_j -
+Q(s_j, a_j;\,\theta_i))^2\bigr]$ is minimised by Adam with learning
+rate $\eta = 10^{-3}$.
+
+Exploration follows an $\varepsilon$-greedy policy with
+$\varepsilon_0 = 1.0$, $\varepsilon_{\min} = 0.05$, and per-episode
+decay factor $\kappa = 0.97$.  Decaying $\varepsilon$ once per episode
+(rather than per step) prevents premature collapse of exploration
+within the first training episode.  The target network is synchronised
+with the policy network once per episode.  Training runs for 50
+episodes of 1\,000 requests each; evaluation uses the full 6\,000-request
+stream with $\varepsilon = 0$.
+
+\subsection{ICE-Style Eviction}
+
+Cache eviction inherits the ICE-style utility metric:
+\begin{equation}
+  \nu(c, t) = p_c(t) \cdot \log(1 + s_c),
+  \label{eq:ice_evict}
+\end{equation}
+where $p_c(t)$ is the Newton-cooling popularity and $s_c$ is the
+content size in MB.  When node $n^*$ must make room for newly fetched
+content, the item with the lowest $\nu$ is evicted.  This metric
+favours retaining large popular items over small unpopular ones,
+which is appropriate given the 50--2500\,MB content size range.
+
+% =========================================================================
+\section{Differences from the ICE Base Paper}
+\label{sec:differences}
+
+Table~\ref{tab:comparison} summarises the principal design differences
+between DEADLINE\_DCCC and the ICE base paper~\cite{ice2022}.
+
+\begin{table}[t]
+  \caption{Design Comparison: ICE vs.\ DEADLINE\_DCCC}
+  \label{tab:comparison}
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{lp{1.8cm}p{2.4cm}}
+    \toprule
+    \textbf{Aspect} & \textbf{ICE~\cite{ice2022}} & \textbf{DEADLINE\_DCCC (Ours)} \\
+    \midrule
+    Observability    & MDP (global state)          & POMDP (local state per node) \\
+    Agents           & Single centralised DQN      & 5 independent per-node DQNs \\
+    Popularity model & Static Zipf                 & Newton-cooling: $({\rho_c + q_c/20}) e^{-\lambda t}$ \\
+    Eviction metric  & $\rho_c \cdot \log(1{+}s_c)$ & Same, with dynamic $p_c(t)$ \\
+    Node selection   & Nearest/hash                & 6-term deadline-aware score \\
+    Deadlines        & None                        & $D_1=35$\,ms, $D_2=95$\,ms \\
+    Routing tiers    & Single-tier edge            & Edge $\to$ coop $\to$ cloud \\
+    Capacity         & Homogeneous                 & $[9,9,2.7,9,2.7]$\,GB \\
+    Traffic          & Uniform Zipf                & Region-skewed: $[0.60,0.25,0.15]$ \\
+    Metrics          & Hit rate, energy            & + deadline satisfaction, P95/P99, load imbalance \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Several design choices merit further discussion.
+
+\textbf{POMDP vs.\ MDP.}  Replacing the single centralised MDP agent
+with per-node POMDP agents eliminates the $O(N \cdot M)$ state
+broadcast cost.  Each agent's seven-dimensional observation
+(Eq.~\ref{eq:obs}) can be computed entirely from local measurements,
+making the system scalable to large clusters.
+
+\textbf{Newton-cooling popularity.}  The static Zipf model in ICE
+assigns a fixed demand rank to each content item for the lifetime of
+the simulation.  In practice, content demand follows a lifecycle:
+items become popular quickly and cool off over time.
+Equation~\ref{eq:newton} models this by introducing a time-decaying
+exponential multiplier.  The cooling coefficient $\lambda = 4 \times
+10^{-4}$ was chosen so that a content item's popularity halves in
+approximately 1\,733 request ticks, matching the observed decay
+pattern in the request stream.
+
+\textbf{Overlap penalty.}  Without a mechanism to discourage
+replication, the ICE serve-then-cache rule tends toward full
+replication of the top-$k$ items across all nodes, which wastes the
+heterogeneous capacity of the weaker (2.7\,GB) nodes.  The overlap
+term $-0.5 \Omega_n$ in Eq.~\ref{eq:score} penalises routing to nodes
+whose caches are already largely replicated elsewhere, nudging the
+cluster toward soft content partitioning.
+
+\textbf{Quadratic load penalty.}  The $-1.2 \cdot \mathrm{load}^2$
+term applies a saturation-only penalty: at $\mathrm{load} = 0.5$
+the contribution is only $-0.3$ score points, while at
+$\mathrm{load} = 1.5$ it reaches $-2.7$ points.  This avoids
+prematurely routing away from a node that is lightly loaded (where
+the round-trip latency would still be good) while strongly penalising
+fully saturated nodes.
+
+\textbf{Deadline risk as a scoring term.}  Rather than implementing
+deadlines as hard constraints (which can lead to infeasibility under
+load), we embed deadline risk $\delta = \max(0, \ell - D_1)$ as a
+soft penalty term.  This gracefully degrades under peak load: when no
+node can meet $D_1$, the system selects the node with the smallest
+latency excess rather than failing.
+
+% =========================================================================
+\section{Experimental Evaluation}
+\label{sec:eval}
+
+\subsection{Experimental Setup}
+
+All experiments are conducted using a discrete-event simulator
+implemented in Python.  The simulator models atomic request processing
+with the latency model of Eq.~\ref{eq:latency} and the load dynamics
+of Eq.~\ref{eq:load}.  Key parameters are summarised in
+Table~\ref{tab:params}.  DRL agents are implemented using PyTorch with
+CPU-only execution for reproducibility (GPU floating-point
+non-determinism is avoided).
+
+\begin{table}[t]
+  \caption{Simulation Parameters}
+  \label{tab:params}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabular}{lll}
+    \toprule
+    \textbf{Parameter} & \textbf{Symbol} & \textbf{Value} \\
+    \midrule
+    Edge nodes                  & $N$          & 5 \\
+    Node capacities (GB)        & --           & $[9,9,2.7,9,2.7]$ \\
+    Content catalogue size      & $M$          & 120 \\
+    Content size range (MB)     & $[s_{\min}, s_{\max}]$ & $[50, 2500]$ \\
+    Zipf exponent               & $\alpha_z$   & 0.85 \\
+    Region weights              & --           & $[0.60, 0.25, 0.15]$ \\
+    Cross-region probability    & --           & 0.35 \\
+    Strict deadline             & $D_1$        & 35\,ms \\
+    Cooperative deadline        & $D_2$        & 95\,ms \\
+    Base edge latency           & $\ell_{\mathrm{base}}$ & 8\,ms \\
+    Coop. path overhead         & $\ell_{\mathrm{coop}}$ & 35\,ms \\
+    Cloud base latency          & --           & 120\,ms \\
+    Cooling coefficient         & $\lambda$    & $4 \times 10^{-4}$ \\
+    Total evaluation requests   & --           & 6\,000 \\
+    DRL training episodes       & --           & 50 \\
+    Requests per episode        & --           & 1\,000 \\
+    DRL learning rate           & $\eta$       & $10^{-3}$ \\
+    Discount factor             & $\gamma$     & 0.95 \\
+    Initial $\varepsilon$       & $\varepsilon_0$ & 1.0 \\
+    Minimum $\varepsilon$       & $\varepsilon_{\min}$ & 0.05 \\
+    $\varepsilon$ decay (per episode) & $\kappa$ & 0.97 \\
+    Batch size                  & --           & 64 \\
+    Hidden layer width          & --           & 64 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+We compare DEADLINE\_DCCC against the following baselines:
+
+\begin{itemize}
+  \item \textbf{LRU}: Least Recently Used eviction with hash-based
+    node selection.
+  \item \textbf{LFU}: Least Frequently Used eviction with hash-based
+    node selection.
+  \item \textbf{DCCC\_HASH}: DCCC cooperative caching with consistent
+    hash routing and ICE-style eviction, without deadline awareness.
+  \item \textbf{DEADLINE\_HEURISTIC}: The six-term scoring function
+    (Eq.~\ref{eq:score}) without DRL augmentation.
+  \item \textbf{DEADLINE\_NO\_OVERLAP}: Ablation that removes the
+    overlap term ($\Omega_n = 0$ always) to isolate its contribution.
+\end{itemize}
+
+\subsection{Performance Results}
+
+Table~\ref{tab:results} reports the aggregate evaluation metrics over
+6\,000 requests.
+
+\begin{table}[t]
+  \caption{Policy Performance Comparison (6\,000 requests, seed 42)}
+  \label{tab:results}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Policy} & \textbf{Hit Rate} & \textbf{Deadline} & \textbf{Avg.\ Lat.} & \textbf{Cloud} \\
+    & (\%) & \textbf{Sat.\ (\%)} & \textbf{(ms)} & \textbf{(\%)} \\
+    \midrule
+    LRU            & 70.6 & 63.2 & 70.0  & 29.4 \\
+    LFU            & 70.0 & 66.2 & 70.0  & 30.0 \\
+    DCCC\_HASH     & 66.1 & 45.2 & 78.3  & 33.9 \\
+    \textbf{DEADLINE\_DCCC} & \textbf{54.5} & \textbf{54.5} & \textbf{87.1} & \textbf{45.5} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Additionally, the DEADLINE\_DCCC policy produces the following
+detailed metric breakdown: edge hit rate 41.4\%, cooperative hit rate
+13.1\%, average energy 67.88 (normalised units), total evictions
+2\,737, load imbalance 1.76, P95 latency 175.4\,ms, and P99 latency
+181.0\,ms.
+
+\subsection{Analysis}
+
+\textbf{Hit rate and deadline satisfaction.}
+DEADLINE\_DCCC achieves a 54.5\% overall hit rate and a 54.5\%
+deadline satisfaction rate.  In the simulator's implementation, these
+two metrics are structurally linked: a cached request is counted as a
+hit only when served within the applicable deadline tier (edge hits
+within $D_1$; cooperative hits within $D_2$).  Cloud fetches are never
+deadline-satisfying.  This design choice means that DEADLINE\_DCCC's
+hit rate directly measures \emph{useful} cache hits—those that also
+respect latency requirements—rather than raw cache presence.
+
+LRU and LFU achieve higher raw hit rates (70.6\% and 70.0\%) because
+they do not enforce deadline filtering: a cache hit is recorded
+regardless of the delivery latency.  Under strict deadline-aware
+counting, their effective deadline satisfaction rates are 63.2\% and
+66.2\% respectively, partly because their simpler eviction policies
+tend to keep recently or frequently requested content in cache without
+regard to which node can serve it fastest.
+
+\textbf{Cloud fetch and latency.}
+DEADLINE\_DCCC's higher cloud fetch rate (45.5\% vs.\ 29.4--33.9\%
+for baselines) reflects the conservative deadline enforcement: requests
+that baselines serve from cache with latency exceeding $D_2$ are
+forwarded to the cloud by DEADLINE\_DCCC.  This increases average
+latency (87.1\,ms) compared to LRU/LFU (70.0\,ms) but ensures that
+served requests are those that genuinely meet QoS requirements.
+
+\textbf{DCCC\_HASH comparison.}
+The DCCC\_HASH policy, which uses the same cooperative caching
+infrastructure but selects nodes by consistent hashing, achieves only
+a 45.2\% deadline satisfaction rate and 78.3\,ms average latency.
+The scoring function in DEADLINE\_DCCC avoids the worst-case latency
+of hash routing by routing around loaded or geographically distant
+home nodes.
+
+\textbf{Cooperative hit decomposition.}
+Of the total hits achieved by DEADLINE\_DCCC, 41.4 percentage points
+correspond to edge hits (served by the local/optimal node within
+$D_1$) and 13.1 percentage points to cooperative hits (served by a
+peer within $D_2$).  This decomposition validates that the two-tier
+routing architecture is actively using both tiers, not degenerating to
+single-tier operation.
+
+\textbf{Load imbalance.}
+The load imbalance metric of 1.76 (defined as the ratio of the
+maximum to minimum node load at the end of evaluation) reflects the
+heterogeneous capacity configuration: strong nodes naturally attract
+more traffic than weak nodes under the scoring function.  A perfectly
+balanced load would yield a ratio of 1.0.  Reducing this further
+requires increasing the coefficient on the load-squared penalty or
+introducing explicit capacity-aware routing, which is left for future
+work.
+
+% =========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented DEADLINE\_DCCC, a deadline-aware multi-agent deep
+reinforcement learning framework for cooperative edge caching under
+partial observability.  The key innovations—the POMDP formulation with
+independent per-node DQN agents, the Newton-cooling popularity model,
+and the six-term deadline-aware scoring function—collectively address
+three structural limitations of the ICE base paper: the centralisation
+assumption, the static popularity model, and the absence of latency
+deadline enforcement.
+
+Our evaluation on a heterogeneous five-node cluster with region-skewed
+Zipf traffic demonstrates that DEADLINE\_DCCC achieves a 54.5\%
+deadline satisfaction rate with 41.4\% edge hits, 13.1\% cooperative
+hits, and an average latency of 87.1\,ms.  While raw hit rates are
+lower than LRU/LFU baselines, this reflects a deliberate design choice
+to count only deadline-satisfying hits, making the metric directly
+meaningful for real-time applications.
+
+Future work will explore (i)~joint training using centralised critics
+with decentralised actors (CTDE) to accelerate convergence while
+retaining runtime independence, (ii)~integration with EdgeSimPy for
+higher-fidelity mobility and energy modelling, (iii)~dynamic coefficient
+adaptation through meta-learning to handle workload shifts, and
+(iv)~validation on real CDN traces with measured deadline distributions.
+
+% =========================================================================
+\section*{Acknowledgement}
+The authors thank the Department of Computer Science and Engineering at
+Dr.\ B.\ R.\ Ambedkar NIT Jalandhar for providing computational
+resources and the DCCC research group for helpful discussions.
+
+% =========================================================================
+\begin{thebibliography}{15}
+
+\bibitem{shi2016edge}
+W.~Shi, J.~Cao, Q.~Zhang, Y.~Li, and L.~Xu,
+``Edge computing: Vision and challenges,''
+\emph{IEEE Internet of Things Journal}, vol.~3, no.~5, pp.~637--646, Oct.\ 2016.
+
+\bibitem{ice2022}
+A.~Al-Habob, O.~Dobre, H.~Yanikomeroglu, and S.~Muhaidat,
+``Towards intelligent adaptive edge caching using deep reinforcement
+learning,''
+\emph{IEEE Transactions on Vehicular Technology}, vol.~71, no.~8, pp.~8983--8998, Aug.\ 2022.
+
+\bibitem{sadeghi2019optimal}
+A.~Sadeghi, F.~Sheikholeslami, and G.~B.~Giannakis,
+``Optimal and scalable caching for 5G using reinforcement learning of
+space-time popularities,''
+\emph{IEEE Journal of Selected Topics in Signal Processing},
+vol.~12, no.~1, pp.~180--190, Feb.\ 2019.
+
+\bibitem{zhong2020deep}
+C.~Zhong, M.~C.~Gursoy, and S.~Velipasalar,
+``A deep reinforcement learning-based framework for content caching,''
+in \emph{Proc.\ 52nd Annual Conference on Information Sciences and
+Systems (CISS)}, Princeton, NJ, Mar.\ 2020, pp.~1--6.
+
+\bibitem{liu2019decentralised}
+J.~Liu, B.~Bai, J.~Zhang, and K.~B.~Letaief,
+``Cache placement in fog-RANs: From centralized to distributed
+algorithms,''
+\emph{IEEE Transactions on Wireless Communications}, vol.~16, no.~11,
+pp.~7039--7051, Nov.\ 2017.
+
+\bibitem{traverso2013temporal}
+S.~Traverso, M.~Ahmed, M.~Garetto, P.~Giaccone, E.~Leonardi, and
+S.~Niccolini,
+``Temporal locality in today's content caching: Why it matters and how
+to model it,''
+\emph{ACM SIGCOMM Computer Communication Review}, vol.~43, no.~5,
+pp.~5--12, Oct.\ 2013.
+
+\bibitem{borst2010distributed}
+S.~Borst, V.~Gupta, and A.~Walid,
+``Distributed caching algorithms for content distribution networks,''
+in \emph{Proc.\ IEEE INFOCOM}, San Diego, CA, Mar.\ 2010, pp.~1--9.
+
+\bibitem{golrezaei2013femtocaching}
+N.~Golrezaei, K.~Shanmugam, A.~G.~Dimakis, A.~F.~Molisch, and
+G.~Caire,
+``FemtoCaching: Wireless content delivery through distributed caching
+helpers,''
+\emph{IEEE Transactions on Information Theory}, vol.~59, no.~12,
+pp.~8402--8413, Dec.\ 2013.
+
+\bibitem{zheng2018heterogeneous}
+W.~Zheng, L.~Gao, G.~Cao, and H.~Zhang,
+``Heterogeneous cellular network with cooperative caching: A matching
+and coalition formation game approach,''
+\emph{IEEE Transactions on Vehicular Technology}, vol.~67, no.~7,
+pp.~6415--6428, Jul.\ 2018.
+
+\bibitem{kaelbling1998planning}
+L.~P.~Kaelbling, M.~L.~Littman, and A.~R.~Cassandra,
+``Planning and acting in partially observable stochastic domains,''
+\emph{Artificial Intelligence}, vol.~101, no.~1--2, pp.~99--134, 1998.
+
+\bibitem{lowe2017multi}
+R.~Lowe, Y.~Wu, A.~Tamar, J.~Harb, P.~Abbeel, and I.~Mordatch,
+``Multi-agent actor-critic for mixed cooperative-competitive
+environments,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+Long Beach, CA, Dec.\ 2017, pp.~6379--6390.
+
+\bibitem{xu2019joint}
+J.~Xu, L.~Chen, and P.~Zhou,
+``Joint service caching and task offloading for mobile edge computing
+in dense networks,''
+in \emph{Proc.\ IEEE INFOCOM}, Paris, France, Apr.\ 2019, pp.~207--215.
+
+\bibitem{liu2020deadline}
+C.~Liu, M.~Bennis, M.~Debbah, and H.~V.~Poor,
+``Dynamic task offloading and resource allocation for ultra-reliable
+low-latency edge computing,''
+\emph{IEEE Transactions on Communications}, vol.~67, no.~6,
+pp.~4132--4150, Jun.\ 2019.
+
+\bibitem{mnih2015human}
+V.~Mnih, K.~Kavukcuoglu, D.~Silver, A.~A.~Rusu, J.~Veness,
+M.~G.~Bellemare, A.~Graves, M.~Riedmiller, A.~K.~Fidjeland,
+G.~Ostrovski, S.~Petersen, C.~Beattie, A.~Sadik, I.~Antonoglou,
+H.~King, D.~Kumaran, D.~Wierstra, S.~Legg, and D.~Hassabis,
+``Human-level control through deep reinforcement learning,''
+\emph{Nature}, vol.~518, pp.~529--533, Feb.\ 2015.
+
+\bibitem{buttazzo2011hard}
+G.~C.~Buttazzo,
+\emph{Hard Real-Time Computing Systems: Predictable Scheduling
+Algorithms and Applications}, 3rd ed.
+New York, NY: Springer, 2011.
+
+\end{thebibliography}
+
+\end{document}

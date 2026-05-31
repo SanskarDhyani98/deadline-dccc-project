@@ -1,0 +1,979 @@
+% EdgeSim-DCCC: A Python Simulation Framework for Deadline-Aware Cooperative Edge Caching
+% Technical Report / Simulator Documentation Paper
+
+\documentclass[12pt]{article}
+
+\usepackage[a4paper, top=25mm, bottom=25mm, left=25mm, right=25mm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{setspace}
+
+% Hyperref configuration
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=green!50!black,
+    urlcolor=blue!60!black,
+    pdftitle={EdgeSim-DCCC: A Python Simulation Framework for Deadline-Aware Cooperative Edge Caching},
+    pdfauthor={EdgeSim-DCCC Project},
+}
+
+% Listings style for Python code
+\definecolor{codebg}{rgb}{0.96,0.96,0.96}
+\definecolor{codecomment}{rgb}{0.4,0.4,0.4}
+\definecolor{codestring}{rgb}{0.1,0.45,0.1}
+\definecolor{codekeyword}{rgb}{0.0,0.3,0.7}
+
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{codebg},
+    commentstyle=\color{codecomment}\itshape,
+    keywordstyle=\color{codekeyword}\bfseries,
+    stringstyle=\color{codestring},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,
+    breaklines=true,
+    keepspaces=true,
+    numbers=left,
+    numbersep=8pt,
+    numberstyle=\tiny\color{gray},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=single,
+    framerule=0.5pt,
+    rulecolor=\color{gray!40},
+}
+
+\lstdefinestyle{shellstyle}{
+    backgroundcolor=\color{black!88},
+    basicstyle=\ttfamily\small\color{white},
+    breaklines=true,
+    frame=single,
+    framerule=0pt,
+    numbers=none,
+}
+
+\lstset{style=pythonstyle}
+
+% Section title formatting
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\itshape\bfseries}{\thesubsubsection}{1em}{}
+
+% Algorithm float caption
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+
+\title{%
+  \vspace{-1cm}%
+  \textbf{EdgeSim-DCCC: A Python Simulation Framework}\\[4pt]
+  \textbf{for Deadline-Aware Cooperative Edge Caching Research}\\[10pt]
+  \large Simulator Documentation and Technical Reference
+}
+
+\author{EdgeSim-DCCC Project}
+\date{May 2026 \quad --- \quad Version 1.0}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+We present \textbf{EdgeSim-DCCC}, an open-source Python simulation framework designed for reproducible, rigorous research on deadline-aware cooperative edge caching in multi-region mobile edge computing networks. The framework provides a deterministic world model (\texttt{build\_world}), a pluggable policy interface, three built-in cache replacement algorithms (LRU, LFU, and ICE-style popularity-weighted eviction), and a Deep Reinforcement Learning (DRL) integration layer based on Deep Q-Networks (DQN). The simulator supports seven caching policies ranging from classic baselines (LRU, LFU) to cooperative heuristics (DCCC\_HASH, DCCC\_NEAREST) and a family of deadline-aware policies (DEADLINE\_HEURISTIC, DEADLINE\_NO\_OVERLAP, DEADLINE\_DCCC). All policies share an identical world instance per random seed, so cross-policy performance variance reflects routing and caching decisions rather than workload sampling noise. An episodic multi-seed evaluation harness produces paired t-test and Wilcoxon signed-rank significance tables automatically. This paper documents the architecture, data models, simulation engine, policy framework, DRL training loop, evaluation harness, and all 59 configurable parameters.
+\end{abstract}
+
+\tableofcontents
+
+\newpage
+
+\section{Introduction}
+
+Mobile edge computing (MEC) places computation and storage resources at the network periphery, enabling content delivery with sub-millisecond latencies compared to centralised cloud infrastructure. Cooperative edge caching extends this paradigm: edge nodes share their cache state to serve requests that miss locally, provided the additional cooperative-lookup latency still meets the application deadline. Designing and evaluating such policies requires a simulation environment that faithfully models heterogeneous node capacities, region-skewed request distributions, content popularity dynamics, deadline constraints at two tiers, and the interactions between routing decisions and cache state.
+
+Existing simulators either abstract away deadline constraints, treat each node independently, or tightly couple the workload model to a specific policy, making ablation studies difficult. EdgeSim-DCCC addresses these gaps with four design principles:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{World isolation.} A single call to \texttt{build\_world(seed, config)} produces a self-contained, reproducible world: content catalogue, edge node topology with pre-seeded caches, and a full request stream. Any number of policies can be evaluated against the same world, ensuring that performance differences are attributable to the policy alone.
+  \item \textbf{Decoupled DRL.} The DRL agent is injected into the simulation loop as a callback (\texttt{drl\_hook}), keeping the core simulator free of PyTorch dependencies for baseline runs.
+  \item \textbf{Pluggable policies.} Adding a new policy requires implementing a node-selection rule and a cache-insertion rule; the request loop, latency model, and metric collection are inherited unchanged.
+  \item \textbf{Statistical rigour.} The evaluation harness runs every (policy, seed) pair through the same framework and automatically computes paired significance tests.
+\end{enumerate}
+
+The remainder of this paper is organised as follows. Section~\ref{sec:arch} gives an architecture overview. Sections~\ref{sec:world}--\ref{sec:engine} describe the world model and simulation engine. Section~\ref{sec:policies} covers the policy framework. Section~\ref{sec:drl} details the DRL integration. Section~\ref{sec:eval} describes the evaluation harness. Section~\ref{sec:config} provides the full configuration reference. Section~\ref{sec:repro} gives reproducibility and usage instructions. Section~\ref{sec:conclusion} concludes.
+
+\section{Architecture Overview}
+\label{sec:arch}
+
+EdgeSim-DCCC is organised into six top-level packages. Figure~\ref{fig:arch} summarises the data flow between components.
+
+\begin{figure}[h]
+\centering
+\textbf{Module dependency and data-flow diagram}
+
+\medskip
+\small
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Package} & \textbf{Key module} & \textbf{Responsibility} \\
+\hline
+\texttt{models/} & \texttt{content.py}, \texttt{edge\_node.py}, \texttt{request.py} & Data classes \\
+\texttt{sim/} & \texttt{simulator.py} & World generation, simulation loop \\
+\texttt{policies/} & \texttt{deadline\_dccc\_policy.py} & Scoring primitives \\
+\texttt{drl/} & \texttt{dqn\_agent.py}, \texttt{trainer.py}, \texttt{replay\_buffer.py} & DQN training \\
+\texttt{experiments/} & \texttt{runner.py}, \texttt{stats.py} & Multi-seed harness \\
+\texttt{configs/} & \texttt{simulation\_config.json} & 59-key parameter store \\
+\hline
+\end{tabular}
+\caption{Module responsibilities. Arrows in the dependency graph flow from consumer to provider: \texttt{runner} $\to$ \texttt{simulator} $\to$ \texttt{models}, \texttt{policies}; \texttt{trainer} $\to$ \texttt{simulator}, \texttt{dqn\_agent}; \texttt{main} $\to$ \texttt{runner}.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Data-Flow Summary}
+
+\begin{enumerate}[noitemsep]
+  \item \texttt{main.py} (or \texttt{runner.py}) parses the JSON config and the CLI flags.
+  \item For each (policy, seed) pair: \texttt{build\_world} creates contents, nodes, and a request stream using a seeded RNG.
+  \item For DEADLINE\_DCCC, \texttt{train\_drl\_agents} trains one DQN per node using abbreviated episodes, then \texttt{make\_eval\_hook} wraps the greedy agents into a callback.
+  \item \texttt{run\_simulation} processes the request stream. For each request it calls \texttt{\_select\_node}, applies the routing decision tree, and calls \texttt{\_insert\_after\_serve}.
+  \item \texttt{SimMetrics.to\_row()} converts accumulated counters and latency lists into a flat metric dictionary.
+  \item \texttt{run\_multi\_seed} aggregates rows into DataFrames and writes per-seed, summary, and significance CSVs.
+\end{enumerate}
+
+\section{World Model}
+\label{sec:world}
+
+The world model is responsible for generating a deterministic, statistically realistic simulation environment. All three sub-components (content catalogue, node topology, request stream) are driven by a single seeded Python \texttt{random.Random} instance so that the entire world can be reproduced exactly from a seed integer.
+
+\subsection{Content Generation}
+
+The content catalogue contains $N_c = 120$ items by default. Each content item $c_i$ is characterised by:
+
+\begin{itemize}[noitemsep]
+  \item \textbf{Size} $s_i \in [50, 2500]$\,MB, drawn uniformly at random.
+  \item \textbf{Base popularity} following a Zipf distribution with exponent $\alpha = 0.85$:
+    \begin{equation}
+      p_i = \frac{1}{(i+1)^{\alpha}}, \quad i = 0, 1, \ldots, N_c - 1.
+    \end{equation}
+  \item \textbf{Region bias vector} $\mathbf{b}_i \in [0.1, 1.0]^{N_r}$, one scalar per region, drawn independently and uniformly; controls how much more likely a user in that region is to request content $i$.
+  \item \textbf{Content type} $\in \{$\texttt{video}, \texttt{image}, \texttt{iot}, \texttt{audio}$\}$, sampled uniformly.
+\end{itemize}
+
+The Zipf exponent $\alpha = 0.85$ produces a moderately heavy-tailed distribution that is less extreme than $\alpha = 1.0$ (standard Zipf), reflecting empirically observed Internet video-on-demand catalogues.
+
+\subsection{Edge Node Topology}
+
+Five edge nodes are created with a heterogeneous capacity profile $[9000, 9000, 2700, 9000, 2700]$\,MB. Each node is assigned a region $r_j = j \bmod N_r$, spreading the five nodes across the three regions $(0, 1, 2)$.
+
+\subsubsection{Initial Cache Distribution}
+
+Before any policy begins processing requests, every content item is placed into the cluster using the DCCC-hash rule: content $i$ is stored at node $i \bmod N_n$ (primary). If $p_i > \theta_{sec} = 0.25$ (the secondary-cache threshold), the item is also stored at node $(i+1) \bmod N_n$ (secondary). This seed distribution is policy-agnostic, ensuring all policies start from an identical cache state.
+
+\subsection{Request Generation}
+
+The request stream of $R = 6000$ requests is generated as follows:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{User region selection}: region $r_u$ is sampled according to weights $[0.60, 0.25, 0.15]$ (region 0 is dominant, reflecting a hot-spot scenario).
+  \item \textbf{Content selection}: for user region $r_u$, each content item $c_i$ receives an adjusted weight
+    \begin{equation}
+      w_i = p_i \cdot \left(1 + \mu_r \cdot b_i^{(r_u)}\right),
+    \end{equation}
+    where $\mu_r = 2.5$ is the region-weight multiplier. Content $c_i$ is then selected by weighted sampling.
+  \item Each request is assigned the strict deadline $D_1 = 35$\,ms.
+\end{enumerate}
+
+\section{Simulation Engine}
+\label{sec:engine}
+
+\subsection{Entry Points}
+
+\begin{description}[noitemsep]
+  \item[\texttt{build\_world(seed, config)}] Constructs and returns a \texttt{World} dataclass containing the content list, node list, request stream, and a content-id look-up dictionary. Calling this function twice with the same seed yields byte-identical worlds.
+  \item[\texttt{run\_simulation(policy, seed, config, world, drl\_hook, log\_callback)}] Runs one (policy, seed) replication and returns a \texttt{SimMetrics} object. If \texttt{world} is supplied it is reused; otherwise it is built internally.
+  \item[\texttt{edge\_latency\_ms(node, content, user\_region, config)}] Computes the latency of serving \texttt{content} from \texttt{node} to \texttt{user\_region} (see Section~\ref{sec:latency}).
+\end{description}
+
+\subsection{Latency Model}
+\label{sec:latency}
+
+The one-way edge-serve latency for node $j$, content $i$, user region $r_u$ is:
+
+\begin{equation}
+  L_{j,i,r_u} = L_{\text{base}} + \tau_{\text{edge}} \cdot s_i + \delta_{\text{load}} \cdot \ell_j + \delta_{\text{region}} \cdot |r_j - r_u|
+\end{equation}
+
+where:
+\begin{itemize}[noitemsep]
+  \item $L_{\text{base}} = 8$\,ms is the base edge processing latency,
+  \item $\tau_{\text{edge}} = 0.012$\,ms/MB is the edge transfer coefficient,
+  \item $\delta_{\text{load}} = 10$\,ms is the per-unit load delay multiplier,
+  \item $\ell_j \in [0, 1.5]$ is the current normalised load of node $j$,
+  \item $\delta_{\text{region}} = 4$\,ms/hop is the inter-region delay.
+\end{itemize}
+
+For cooperative retrieval, the cooperative latency is:
+\begin{equation}
+  L_{\text{coop}} = D_{\text{coop\_path}} + \frac{L_{j,i,r_u}}{2}
+\end{equation}
+
+where $D_{\text{coop\_path}} = 35$\,ms is the inter-node messaging overhead and the halving approximates a round-trip offset. Cloud fallback costs:
+\begin{equation}
+  L_{\text{cloud}} = L_{\text{cloud\_base}} + \tau_{\text{cloud}} \cdot s_i = 120 + 0.025 \cdot s_i \text{ ms}.
+\end{equation}
+
+\subsection{Request Processing Loop}
+
+Algorithm~\ref{alg:sim} describes the main simulation loop. For each request the simulator (i) decays node loads, (ii) builds a candidate node set, (iii) selects the target node via the policy hook, (iv) resolves a routing path (edge / cooperative / cloud), (v) updates the cache, and (vi) records metrics.
+
+\begin{algorithm}[h]
+\caption{Main Simulation Loop (\texttt{run\_simulation})}
+\label{alg:sim}
+\begin{algorithmic}[1]
+\Require policy $\pi$, world $\mathcal{W}$, config $\mathcal{C}$, optional drl\_hook
+\Ensure SimMetrics
+\State Initialise metrics counters; $\text{request\_counts}[c] \leftarrow 0$ for all $c$
+\For{$(t, \text{req})$ in enumerate($\mathcal{W}.\text{requests}$)}
+  \State $c \leftarrow \mathcal{W}.\text{content\_map}[\text{req}.\text{content\_id}]$
+  \State $\text{request\_counts}[c] \mathrel{+}= 1$
+  \State $\text{pop} \leftarrow \textsc{NewtonPopularity}(c,\, t,\, \text{request\_counts}[c])$
+  \ForAll{node $j \in \mathcal{W}.\text{nodes}$}
+    \State $\ell_j \leftarrow \max(0,\; \ell_j \cdot \lambda_{\text{decay}} + \text{noise})$ \Comment{load decay + jitter}
+  \EndFor
+  \State $\mathcal{N}_c \leftarrow$ nodes in req.region $\cup$ \{nodes with $P(\text{cross}) < p_{\text{cross}}\}$
+  \State $(\hat{n}, \_) \leftarrow \textsc{SelectNode}(\pi, \mathcal{N}_c, \mathcal{W}.\text{nodes}, c, \text{req.region}, \text{pop}, D_1)$
+  \State $L_{\hat{n}} \leftarrow \textsc{EdgeLatency}(\hat{n}, c, \text{req.region})$
+  \If{$\pi = \text{DEADLINE\_DCCC}$ and drl\_hook $\neq$ None}
+    \State $a \leftarrow \text{drl\_hook}(\hat{n}, c, L_{\hat{n}}, \text{req.deadline}, \mathcal{N}_c, \mathcal{W}.\text{nodes})$
+  \Else
+    \State $a \leftarrow \text{None}$
+  \EndIf
+  \If{$a = 1$ (FORWARD\_DCCC)}
+    \State attempt cooperative lookup; fall back to cloud
+  \ElsIf{$\hat{n}.\text{has}(c)$ and $L_{\hat{n}} \leq D_1$}
+    \State hit\_type $\leftarrow$ \texttt{edge}; latency $\leftarrow L_{\hat{n}}$
+  \ElsIf{$\pi \in$ DCCC-family and cooperative holder found within $D_2$}
+    \State hit\_type $\leftarrow$ \texttt{cooperative}; latency $\leftarrow L_{\text{coop}}$
+  \Else
+    \State hit\_type $\leftarrow$ \texttt{cloud}; latency $\leftarrow L_{\text{cloud}}$
+  \EndIf
+  \State evictions $\leftarrow \textsc{InsertAfterServe}(\pi, \text{cache\_target}, c, \text{pop}, t, \text{hit\_type})$
+  \State update load, serves\_per\_node, hit counters, latencies, energy, evictions
+  \If{log\_callback $\neq$ None}
+    \State log\_callback(\{request, policy, hit\_type, latency, \ldots\})
+  \EndIf
+\EndFor
+\State \Return metrics
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Load Model}
+
+Node load $\ell_j$ is a normalised scalar in $[0, \ell_{\max}]$ where $\ell_{\max} = 1.5$. After each time step, all loads decay by a factor $\lambda_{\text{decay}} = 0.90$ plus a small uniform noise term with amplitude $5 \times 10^{-3}$ to prevent bit-identical trajectories when two policies make identical routing choices. Each served request (edge or cooperative) increments the serving node's load by $\Delta_{\ell} = 0.25$.
+
+\subsection{Energy Model}
+
+Energy cost per request is modelled as:
+\begin{equation}
+  e_{\text{req}} = \alpha_{\text{tier}} \cdot s_i
+\end{equation}
+
+where $\alpha_{\text{local}} = 0.02$ for edge and cooperative serves and $\alpha_{\text{cloud}} = 0.09$ for cloud fetches, reflecting the well-established observation that offloading to the cloud incurs $4.5\times$ more energy per megabyte transferred.
+
+\subsection{Metrics Collected}
+
+The \texttt{SimMetrics.to\_row()} method produces the following columns per (policy, seed) replication:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Metric} & \textbf{Formula} & \textbf{Better} \\
+\midrule
+hit\_rate & $(H_e + H_c) / R$ & $\uparrow$ \\
+edge\_hit\_rate & $H_e / R$ & $\uparrow$ \\
+coop\_hit\_rate & $H_c / R$ & $\uparrow$ \\
+cloud\_fetch\_rate & $H_{\text{cl}} / R$ & $\downarrow$ \\
+deadline\_satisfaction & $D_{\text{met}} / R$ & $\uparrow$ \\
+avg\_latency\_ms & $\bar{L}$ & $\downarrow$ \\
+p95\_latency\_ms & $L_{0.95}$ & $\downarrow$ \\
+p99\_latency\_ms & $L_{0.99}$ & $\downarrow$ \\
+avg\_energy & $\bar{e}$ & $\downarrow$ \\
+cache\_evictions & $\sum \text{evictions}$ & $\downarrow$ \\
+load\_imbalance & $\max(\text{serves}_j) / \bar{\text{serves}}$ & $\downarrow$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Policy Framework}
+\label{sec:policies}
+
+\subsection{Policy Plugin Interface}
+
+All policies share the same simulation loop. A policy is distinguished by two functions:
+
+\begin{description}[noitemsep]
+  \item[\texttt{\_select\_node}] Given the candidate node set, all nodes, the content, user region, popularity, and $D_1$, returns the \emph{(node, score)} pair that the policy routes to.
+  \item[\texttt{\_insert\_after\_serve}] Given the serving node, content, popularity, time step, and hit type, performs the cache insertion (possibly evicting items) and returns the number of evictions.
+\end{description}
+
+To add a new policy, a developer adds a branch in each of these two functions and registers the policy name in \texttt{configs/simulation\_config.json} under the \texttt{policies} list.
+
+\subsection{Cache Replacement Algorithms}
+
+\subsubsection{Least Recently Used (LRU)}
+
+LRU (\texttt{add\_lru}) maintains a \texttt{last\_access} dictionary keyed by content ID. On insertion, if capacity is exhausted, the item with the smallest \texttt{last\_access} timestamp is evicted. On a cache hit, the access time is refreshed. This is the classic O(1) approximation to Belady's optimal policy under recency-dominant workloads.
+
+\subsubsection{Least Frequently Used (LFU)}
+
+LFU (\texttt{add\_lfu}) maintains a \texttt{frequency} counter per item. The item with the lowest cumulative access count is evicted when the cache is full. LFU is well-suited to steady-state Zipf workloads but can retain stale items that were popular early in the trace.
+
+\subsubsection{ICE-Style Popularity-Weighted Eviction (\texttt{add\_ice\_style})}
+
+The ICE-style eviction (\texttt{add\_ice\_style}) assigns each cached item a reward score:
+\begin{equation}
+  \rho_i(t) = \text{pop}(i, t) \cdot \log_e(1 + s_i)
+\end{equation}
+
+The term $\log_e(1 + s_i)$ implements a size-aware priority: a large, popular item is more valuable to retain than a small item of equal popularity, because it saves more bandwidth if served from the edge. The item with the lowest $\rho$ is evicted. The score is refreshed on every cache hit so that content which has cooled in popularity (via Newton cooling) eventually becomes eviction-eligible.
+
+An ICE-style cache gate $\theta_{\text{ice}} = 0.6$ is applied: an edge hit does not trigger re-insertion unless $\text{pop} \cdot \log_e(1 + s_i) > \theta_{\text{ice}}$. This prevents churning items that are already hot in the local cache.
+
+\subsection{Baseline Policies}
+
+\subsubsection{LRU}
+
+LRU routes to the nearest accessible node (minimum latency) within the candidate set and uses \texttt{add\_lru} for cache management. It does not use cooperative lookup: if the selected node misses, the request goes directly to cloud.
+
+\subsubsection{LFU}
+
+Identical routing to LRU but uses \texttt{add\_lfu} for eviction.
+
+\subsubsection{DCCC\_HASH}
+
+Hash-based cooperative caching: node $j^* = c_i \bmod N_n$ is always selected, regardless of load, latency, or current cache state. If $j^*$ misses, a cooperative lookup scans all nodes and routes to the best holder within $D_2 = 95$\,ms; otherwise falls back to cloud. Cache management uses ICE-style insertion.
+
+\subsubsection{DCCC\_NEAREST}
+
+Latency-aware cooperative caching: the node with minimum $L_{j,i,r_u}$ among the candidate set is selected. Cooperative lookup and ICE-style insertion are used as in DCCC\_HASH.
+
+\subsection{Deadline-Aware Policies}
+
+\subsubsection{DEADLINE\_HEURISTIC}
+
+Selects the node maximising the deadline-aware score $S(j, i, r_u, t)$ (Section~\ref{sec:score}) including the overlap penalty term. Cache management uses ICE-style insertion. No DRL component.
+
+\subsubsection{DEADLINE\_NO\_OVERLAP}
+
+Identical to DEADLINE\_HEURISTIC except the $w_{\text{overlap}}$ term is dropped (\texttt{drop\_overlap=True}). This ablation tests whether the soft cache-partitioning incentive in the overlap term is beneficial.
+
+\subsubsection{DEADLINE\_DCCC}
+
+The proposed policy. Selects the node via the deadline-aware score (same as DEADLINE\_HEURISTIC), but the DRL hook may override the routing action for the selected node before the request is served. Section~\ref{sec:drl} details the DRL component.
+
+\subsection{Deadline-Aware Scoring Function}
+\label{sec:score}
+
+The heuristic node-selection score is:
+
+\begin{equation}
+  S(j) = w_p \cdot \text{pop} + w_h \cdot h_j - w_o \cdot \text{overlap}_j - w_l \cdot L_{j} - w_{\ell^2} \cdot \ell_j^2 - w_r \cdot \max(0, L_j - D_1)
+\end{equation}
+
+where:
+\begin{itemize}[noitemsep]
+  \item $h_j = 1$ if node $j$ caches content $i$, else $\min(0.5, \text{pop})$ (partial credit for a likely-warm miss).
+  \item $\text{overlap}_j$ is the fraction of node $j$'s cache also held by at least one other candidate node (Section~\ref{sec:overlap}).
+  \item The $\ell_j^2$ term penalises load \emph{non-linearly}, imposing a heavy cost only near saturation while tolerating moderate utilisation.
+  \item $\max(0, L_j - D_1)$ is the deadline-risk penalty: zero when the node can serve within $D_1$, positive and growing when it cannot.
+\end{itemize}
+
+Default weights: $w_p = 2.0$, $w_h = 6.0$, $w_o = 0.5$, $w_l = 0.08$, $w_{\ell^2} = 1.2$, $w_r = 0.4$. The $w_h = 6.0$ dominates, strongly preferring nodes that already cache the content to avoid cold-miss cooperative overhead.
+
+\subsection{Newton-Cooling Popularity}
+\label{sec:newtoncool}
+
+The instantaneous popularity of content $i$ at time step $t$ is:
+
+\begin{equation}
+  \text{pop}(i, t) = \left( p_i + \frac{n_i(t)}{\sigma} \right) \cdot e^{-\lambda t}
+\end{equation}
+
+where $n_i(t)$ is the cumulative request count for content $i$ up to time $t$, $\sigma = 20$ is the request-scale normaliser, and $\lambda = 4 \times 10^{-4}$ is the cooling rate. The formula combines the static Zipf rank with a dynamic demand signal: a content that receives many requests quickly gains a popularity boost. The exponential decay ensures that historically popular but currently cold content eventually falls below the ICE eviction threshold.
+
+\subsection{Common-Overlap Ratio}
+\label{sec:overlap}
+
+\begin{equation}
+  \text{overlap}(j, \mathcal{N}_c) = \frac{|\text{cache}(j) \cap \bigcup_{k \neq j, k \in \mathcal{N}_c} \text{cache}(k)|}{|\text{cache}(j)|}
+\end{equation}
+
+A value of $1.0$ means every item node $j$ holds is also available at some other candidate node. The overlap penalty in $S(j)$ softly discourages routing to nodes that offer no unique cached content to the cooperative cluster, nudging the cluster towards a natural soft-partitioning of the content catalogue across nodes.
+
+\section{Deep Reinforcement Learning Integration}
+\label{sec:drl}
+
+\subsection{Problem Formulation as POMDP}
+
+The edge caching routing problem is formulated as a Partially Observable Markov Decision Process (POMDP). Each edge node operates an independent DQN agent that observes its own local state. The partial observability arises because no agent has access to the global cache state or the request stream of other nodes.
+
+\begin{description}[noitemsep]
+  \item[State space $\mathcal{S}$] 7-dimensional continuous vector (Section~\ref{sec:state}).
+  \item[Action space $\mathcal{A}$] $\{0, 1, 2\}$ (Section~\ref{sec:actions}).
+  \item[Reward $r$] Shaped scalar (Section~\ref{sec:reward}).
+  \item[Transition] Implicit in the simulator; the next state is determined by the request stream and the cache evolution following the chosen action.
+\end{description}
+
+\subsection{7-Dimensional State Vector}
+\label{sec:state}
+
+At each request routed to node $j$, the agent for node $j$ observes:
+
+\begin{center}
+\begin{tabular}{clll}
+\toprule
+\textbf{Dim} & \textbf{Feature} & \textbf{Formula} & \textbf{Range} \\
+\midrule
+0 & Base popularity & $p_i$ & $[0, 1]$ \\
+1 & Normalised size & $s_i / 2500$ & $[0.02, 1]$ \\
+2 & Local cache indicator & $\mathbf{1}[c_i \in \text{cache}(j)]$ & $\{0, 1\}$ \\
+3 & Node load & $\ell_j$ & $[0, 1.5]$ \\
+4 & Normalised latency & $L_{j,i,r_u} / 200$ & $\approx[0,1]$ \\
+5 & Cache overlap ratio & $\text{overlap}(j, \mathcal{N}_c)$ & $[0, 1]$ \\
+6 & Deadline slack (normalised) & $\max(0, L_j - D_1) / 200$ & $[0, 1]$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Dimension 2 is the single most informative feature: if the agent's node already holds the content, serving locally is almost always optimal unless the node is heavily loaded. Dimension 6 directly encodes the degree to which a local serve would violate the deadline, pushing the agent towards cooperative or default forwarding when the deadline is at risk.
+
+\subsection{3-Action Space}
+\label{sec:actions}
+
+\begin{description}[noitemsep]
+  \item[Action 0 -- SERVE\_LOCAL (default)] No override; the simulator's standard routing decision tree applies (edge $\to$ cooperative $\to$ cloud).
+  \item[Action 1 -- FORWARD\_DCCC] Skip local serve attempt and jump directly to cooperative lookup. Useful when the agent detects it cannot meet $D_1$ but a cooperative node can meet $D_2$.
+  \item[Action 2 -- DEFAULT\_POLICY] Equivalent to Action 0 in the current implementation; reserved for future extension (e.g., triggering pre-fetch).
+\end{description}
+
+The action space is intentionally narrow. Cache insertion decisions are handled by the ICE-style eviction logic and are not part of the action space; this decoupling produces significantly more stable Q-value convergence than joint routing-and-caching action spaces.
+
+\subsection{Network Architecture}
+
+Each DQN agent uses a two-hidden-layer fully connected network:
+
+\begin{equation}
+  \hat{Q}(s, a; \theta) = W_3 \cdot \text{ReLU}(W_2 \cdot \text{ReLU}(W_1 s + b_1) + b_2) + b_3
+\end{equation}
+
+where all hidden layers have width $H = 64$. A separate target network $\hat{Q}^-(s, a; \theta^-)$ is maintained and synced to $\theta$ at the end of each episode (hard update). The optimiser is Adam with learning rate $\eta = 10^{-3}$ and the loss is mean-squared error between the current Q-value and the Bellman target:
+
+\begin{equation}
+  \mathcal{L}(\theta) = \left( r + \gamma \max_{a'} \hat{Q}^-(s', a'; \theta^-) - \hat{Q}(s, a; \theta) \right)^2
+\end{equation}
+
+with discount factor $\gamma = 0.95$.
+
+\subsection{Experience Replay}
+
+Each agent maintains a circular replay buffer of capacity 10\,000 transitions $(s, a, r, s', \text{done})$. Mini-batches of size $B = 64$ are sampled uniformly at random. Training is performed after every request once the buffer holds at least $B$ transitions.
+
+A simplification is made: because the simulator does not expose the true next-state $s'$ at the time the action is taken (the next state depends on the outcome), the current state $s$ is used as a proxy for $s'$. This is a common approximation in online edge-caching DRL; the agent learns relative action preferences from the immediate reward rather than multi-step value estimates.
+
+\subsection{Reward Function}
+\label{sec:reward}
+
+\begin{equation}
+  r = \begin{cases} +r_e & \text{if hit\_type = edge} \\ +r_c & \text{if hit\_type = cooperative} \\ -r_{\text{cl}} & \text{if hit\_type = cloud} \end{cases}
+  - r_{l} \cdot L + \begin{cases} +r_d & \text{if deadline met} \\ -r_d & \text{if deadline missed} \end{cases}
+\end{equation}
+
+Default values: $r_e = 5.0$, $r_c = 3.0$, $r_{\text{cl}} = 5.0$, $r_l = 0.03$, $r_d = 5.0$. The latency coefficient $r_l$ is small relative to the hit/miss terms so the agent prioritises cache efficiency; $r_d$ creates a binary deadline signal that dominates when the deadline is very tight.
+
+\subsection{Training Loop}
+
+Algorithm~\ref{alg:train} summarises the episodic training procedure. Training runs for $E = 50$ episodes. Each episode shuffles the first 1\,000 requests from the world's request stream, runs a simulation with the DRL hook active, and after the episode syncs target networks and decays $\varepsilon$.
+
+\begin{algorithm}[h]
+\caption{DQN Training Loop (\texttt{train\_drl\_agents})}
+\label{alg:train}
+\begin{algorithmic}[1]
+\Require seed, config, world $\mathcal{W}$
+\Ensure trained agents $\{\mathcal{A}_j\}_{j=0}^{N_n - 1}$, history
+\State Initialise one DQNAgent per node; $\varepsilon \leftarrow 1.0$
+\For{episode $e = 1, \ldots, E$}
+  \State Shuffle $\mathcal{W}.\text{requests}[0:T_{\text{train}}]$ with seed $s \cdot 7919 + e$
+  \State Run \texttt{run\_simulation} with drl\_hook and log\_callback active
+  \Comment{Per-request: agent selects action; log\_callback trains on transition}
+  \State Sync target networks for all agents
+  \State $\varepsilon \leftarrow \max(\varepsilon_{\min}, \varepsilon \cdot \varepsilon_{\text{decay}})$ \quad ($\varepsilon_{\text{decay}} = 0.97$, $\varepsilon_{\min} = 0.05$)
+  \State Record episode reward, mean loss, $\varepsilon$
+\EndFor
+\State Restore original request stream to $\mathcal{W}$
+\State \Return agents, history
+\end{algorithmic}
+\end{algorithm}
+
+After training, \texttt{make\_eval\_hook} sets $\varepsilon = 0$ for all agents (pure greedy) and wraps them in a hook suitable for evaluation runs.
+
+\section{Evaluation Harness}
+\label{sec:eval}
+
+\subsection{Multi-Seed Runner}
+
+\texttt{run\_multi\_seed} iterates over all (policy, seed) pairs in the Cartesian product $\Pi \times \mathcal{S}$ where $\Pi$ is the policy list and $\mathcal{S} = \{42, 43, 44, 45, 46\}$ is the seed set. For each pair:
+
+\begin{enumerate}[noitemsep]
+  \item A fresh world is built via \texttt{build\_world(seed, config)}.
+  \item For \texttt{DEADLINE\_DCCC}, DRL agents are trained independently per seed (so each seed yields its own trained policy, not a shared checkpoint).
+  \item After training, the world is rebuilt to a clean state and the evaluation run executes with $R_{\text{eval}} = 6000$ requests.
+  \item For all other policies, a single simulation run is performed.
+\end{enumerate}
+
+This design means the DRL policy has been independently trained on each seed's world, giving an honest estimate of per-seed variance rather than measuring the variance of a single trained checkpoint.
+
+\subsection{Output Files}
+
+Three CSV files are written to the output directory (default \texttt{results/}):
+
+\begin{description}[noitemsep]
+  \item[\texttt{per\_seed.csv}] One row per (policy, seed) with all 11 metrics. The primary raw data file.
+  \item[\texttt{summary.csv}] One row per policy with mean and 95\% confidence interval half-width for each metric.
+  \item[\texttt{significance.csv}] One row per metric comparing \texttt{DEADLINE\_DCCC} to the strongest non-deadline baseline on that metric, including relative change (\%), paired t-test p-value, and Wilcoxon signed-rank p-value.
+  \item[\texttt{drl\_training\_history.csv}] (when DRL is trained) One row per (seed, episode) with cumulative reward, average loss, and $\varepsilon$.
+\end{description}
+
+\subsection{Statistical Tests}
+
+\subsubsection{95\% Confidence Intervals}
+
+For each metric and policy, the 95\% CI half-width is computed as:
+\begin{equation}
+  \text{CI}_{95} = 1.96 \cdot \frac{\hat{\sigma}}{\sqrt{n}}
+\end{equation}
+
+where $n$ is the number of seeds and $\hat{\sigma}$ is the sample standard deviation. This uses the normal approximation; for $n = 5$ seeds the t-multiplier would be $t_{4, 0.025} = 2.776$, which is more conservative. The normal approximation is used to avoid a hard dependency on \texttt{scipy}.
+
+\subsubsection{Paired t-Test}
+
+Let $x_k$ and $y_k$ denote the metric value for DEADLINE\_DCCC and the best baseline respectively at seed $k$. The paired differences $d_k = x_k - y_k$ are tested against $H_0: \mu_d = 0$ using:
+
+\begin{equation}
+  t = \frac{\bar{d}}{\hat{\sigma}_d / \sqrt{n}}, \quad p = 2 \cdot \Phi(-|t|)
+\end{equation}
+
+where $\Phi$ is the standard normal CDF computed via the Abramowitz \& Stegun approximation for $\text{erf}$.
+
+\subsubsection{Wilcoxon Signed-Rank Test}
+
+The non-parametric complement to the paired t-test. The signed-rank statistic $W^+$ is computed using average ranks for ties, and the normal approximation
+
+\begin{equation}
+  z = \frac{W^+ - n(n+1)/4}{\sqrt{n(n+1)(2n+1)/24}}
+\end{equation}
+
+is used to derive a two-sided p-value. This test is more robust to the non-Gaussian distributions of latency and eviction counts.
+
+\subsection{Baseline Selection}
+
+For each metric, the best non-deadline baseline is selected as:
+\begin{itemize}[noitemsep]
+  \item The baseline policy with the highest mean for metrics where higher is better (hit rate, deadline satisfaction).
+  \item The baseline policy with the lowest mean for metrics where lower is better (latency, cloud fetch rate, energy, evictions, load imbalance).
+\end{itemize}
+
+Policies in the \texttt{DEADLINE\_*} family are excluded from baseline selection so that the significance test is always against a non-proposed competitor.
+
+\section{Configuration Reference}
+\label{sec:config}
+
+All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every parameter can be overridden at runtime by passing a modified config path via \texttt{--config}. The tables below group parameters by functional area.
+
+\subsection{Network and Topology}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{num\_edge\_nodes} & int & 5 & Number of edge nodes in the cluster \\
+\texttt{num\_regions} & int & 3 & Number of geographic regions \\
+\texttt{num\_contents} & int & 120 & Catalogue size \\
+\texttt{cache\_capacity\_mb} & int & 9000 & Default per-node capacity (MB) \\
+\texttt{capacity\_profile} & list[int] & [9000,9000,2700,9000,2700] & Per-node capacity (overrides default) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Traffic Model}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{num\_requests} & int & 6000 & Total requests per simulation run \\
+\texttt{region\_request\_weights} & list[float] & [0.60,0.25,0.15] & Region popularity weights (sum = 1) \\
+\texttt{region\_weight\_multiplier} & float & 2.5 & Region-bias amplification for content selection \\
+\texttt{cross\_region\_prob} & float & 0.35 & Prob. a node outside user region is a candidate \\
+\texttt{zipf\_exponent} & float & 0.85 & Zipf exponent for content popularity \\
+\texttt{content\_size\_min\_mb} & int & 50 & Minimum content size (MB) \\
+\texttt{content\_size\_max\_mb} & int & 2500 & Maximum content size (MB) \\
+\texttt{region\_bias\_min} & float & 0.1 & Min value for per-region bias draw \\
+\texttt{region\_bias\_max} & float & 1.0 & Max value for per-region bias draw \\
+\texttt{content\_types} & list[str] & [video,image,iot,audio] & Content type vocabulary \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Latency and Deadline}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{strict\_deadline\_ms} & int & 35 & Tier-1 (edge) deadline in ms \\
+\texttt{cooperative\_deadline\_ms} & int & 95 & Tier-2 (cooperative) deadline in ms \\
+\texttt{base\_edge\_latency\_ms} & int & 8 & Base processing latency at edge \\
+\texttt{coop\_path\_latency\_ms} & int & 35 & Inter-node messaging overhead (ms) \\
+\texttt{cloud\_latency\_ms} & int & 120 & Cloud base latency (ms) \\
+\texttt{transfer\_ms\_per\_mb} & float & 0.012 & Edge transfer coefficient (ms/MB) \\
+\texttt{cloud\_transfer\_ms\_per\_mb} & float & 0.025 & Cloud transfer coefficient (ms/MB) \\
+\texttt{load\_delay\_ms} & float & 10.0 & Per-unit load delay multiplier (ms) \\
+\texttt{region\_delay\_ms\_per\_hop} & float & 4.0 & Inter-region delay per hop (ms) \\
+\texttt{max\_node\_load} & float & 1.5 & Load ceiling for a node \\
+\texttt{load\_increment\_per\_serve} & float & 0.25 & Load increment per served request \\
+\texttt{load\_decay} & float & 0.90 & Per-step load decay multiplier \\
+\texttt{load\_noise\_amplitude} & float & 0.005 & Stochastic jitter on load decay \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Cache Management}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{secondary\_cache\_threshold} & float & 0.25 & Min base\_pop for secondary seed placement \\
+\texttt{ice\_cache\_gate} & float & 0.6 & Min $\text{pop} \cdot \log(1+s)$ for edge-hit re-insert \\
+\texttt{cooling\_lambda} & float & 0.0004 & Newton-cooling decay rate $\lambda$ \\
+\texttt{popularity\_request\_scale} & float & 20.0 & Demand normaliser $\sigma$ in Newton popularity \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Deadline-Aware Score Weights}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{score\_w\_popularity} & float & 2.0 & Weight $w_p$ for popularity term \\
+\texttt{score\_w\_hit\_chance} & float & 6.0 & Weight $w_h$ for cache hit indicator \\
+\texttt{score\_w\_overlap} & float & 0.5 & Weight $w_o$ for cache overlap penalty \\
+\texttt{score\_w\_latency} & float & 0.08 & Weight $w_l$ for latency term \\
+\texttt{score\_w\_load\_sq} & float & 1.2 & Weight $w_{\ell^2}$ for quadratic load penalty \\
+\texttt{score\_w\_deadline\_risk} & float & 0.4 & Weight $w_r$ for deadline-risk penalty \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Energy Model}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{energy\_local\_factor} & float & 0.02 & Energy coefficient for edge/coop serve (per MB) \\
+\texttt{energy\_cloud\_factor} & float & 0.09 & Energy coefficient for cloud fetch (per MB) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{DRL Hyperparameters}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{drl\_state\_size} & int & 7 & Observation vector dimension \\
+\texttt{drl\_action\_size} & int & 3 & Number of discrete actions \\
+\texttt{drl\_learning\_rate} & float & 0.001 & Adam learning rate $\eta$ \\
+\texttt{drl\_gamma} & float & 0.95 & Discount factor $\gamma$ \\
+\texttt{drl\_epsilon} & float & 1.0 & Initial $\varepsilon$-greedy exploration rate \\
+\texttt{drl\_epsilon\_min} & float & 0.05 & Minimum $\varepsilon$ after decay \\
+\texttt{drl\_epsilon\_decay} & float & 0.97 & Per-episode $\varepsilon$ decay multiplier \\
+\texttt{drl\_batch\_size} & int & 64 & Mini-batch size for Q-network update \\
+\texttt{drl\_hidden\_size} & int & 64 & Hidden layer width in DQNNetwork \\
+\texttt{num\_episodes} & int & 50 & Number of training episodes \\
+\texttt{train\_requests\_per\_episode} & int & 1000 & Requests used per training episode \\
+\texttt{eval\_requests} & int & 6000 & Requests used in evaluation run \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Reward Shaping}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{reward\_edge\_hit} & float & 5.0 & Reward for serving from edge cache \\
+\texttt{reward\_coop\_hit} & float & 3.0 & Reward for serving from cooperative node \\
+\texttt{reward\_cloud\_penalty} & float & 5.0 & Penalty for cloud fetch \\
+\texttt{reward\_latency\_coef} & float & 0.03 & Per-ms latency penalty coefficient \\
+\texttt{reward\_deadline\_bonus} & float & 5.0 & Bonus/penalty for meeting/missing deadline \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Experiment Harness}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{seeds} & list[int] & [42,43,44,45,46] & Random seeds for multi-seed evaluation \\
+\texttt{policies} & list[str] & (all 7 policies) & Policies included in experiment matrix \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Reproducibility and Usage}
+\label{sec:repro}
+
+\subsection{Installation}
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+git clone <repository-url>
+cd deadline_dccc_project
+pip install -r requirements.txt
+# or: pip install -e .
+\end{lstlisting}
+
+Requirements include: \texttt{torch >= 2.0}, \texttt{pandas}, \texttt{matplotlib} (for \texttt{plots/}). The core simulator and heuristic policies have no dependencies beyond the Python standard library.
+
+\subsection{CLI Reference}
+
+The top-level entry point is \texttt{main.py}, which wraps \texttt{experiments/runner.py}. All flags are optional; omitting them uses the defaults from \texttt{configs/simulation\_config.json}.
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+python main.py [--config PATH]
+               [--seeds N [N ...]]
+               [--policies NAME [NAME ...]]
+               [--no-drl]
+               [--episodes K]
+               [--output-dir DIR]
+               [--skip-plots]
+\end{lstlisting}
+
+\subsection{Example Runs}
+
+\subsubsection{Full Research Run}
+
+Runs all 7 policies over 5 seeds with DRL training enabled. This is the canonical experiment that produces all result files and plots.
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+python main.py
+\end{lstlisting}
+
+Expected output:
+\begin{lstlisting}[style=shellstyle, language=bash]
+[run] policy=LRU                    seed=42
+[run] policy=LRU                    seed=43
+...
+[run] policy=DEADLINE_DCCC          seed=42
+  [DRL training] seed=42, episodes=50
+  Episode   1/ 50 | reward= -3241.75 | avg_loss= 0.4832 | eps=0.970
+  Episode   2/ 50 | reward= -1802.43 | avg_loss= 0.3106 | eps=0.941
+  ...
+  Episode  50/ 50 | reward=  4891.22 | avg_loss= 0.0187 | eps=0.050
+...
+=== Summary (mean across seeds) ===
+...
+=== Significance (DEADLINE_DCCC vs best baseline) ===
+...
+Wrote plots to plots/*.png
+\end{lstlisting}
+
+\subsubsection{Quick Smoke Test (No DRL)}
+
+Runs only LRU, LFU, and DCCC\_HASH on a single seed without DRL training. Completes in seconds.
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+python main.py --no-drl --seeds 42 --policies LRU LFU DCCC_HASH
+\end{lstlisting}
+
+\subsubsection{Deadline-Aware Ablation}
+
+Runs the three deadline-aware policies on seeds 42 and 43 with a shorter training run of 20 episodes.
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+python main.py --policies DEADLINE_HEURISTIC DEADLINE_NO_OVERLAP DEADLINE_DCCC \
+               --seeds 42 43 --episodes 20
+\end{lstlisting}
+
+\subsubsection{Single-Policy Evaluation with Custom Config}
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+python main.py --config configs/simulation_config.json \
+               --policies DEADLINE_DCCC --seeds 42 43 44 45 46
+\end{lstlisting}
+
+\subsubsection{Running the Experiment Harness Directly}
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+python -m experiments.runner --no-drl --output-dir results_baseline
+\end{lstlisting}
+
+\subsection{Output Directory Structure}
+
+After a full run the output directory contains:
+
+\begin{lstlisting}[style=shellstyle, language=bash]
+results/
+  per_seed.csv              # (policy, seed) x 11 metrics
+  summary.csv               # per-policy mean +/- CI95
+  significance.csv          # DEADLINE_DCCC vs best baseline
+  drl_training_history.csv  # per (seed, episode) reward/loss/eps
+
+plots/
+  performance_rates.png     # hit/cloud/deadline rates bar chart
+  latency_breakdown.png     # latency CDF or bar chart
+  # additional plots if plots/plots.py generates them
+\end{lstlisting}
+
+\subsection{Extending the Framework}
+
+\subsubsection{Adding a New Policy}
+
+\begin{enumerate}
+  \item Open \texttt{sim/simulator.py}.
+  \item Add a constant string for the policy name, e.g., \texttt{MY\_POLICY = "MY\_POLICY"}.
+  \item Add a branch in \texttt{\_select\_node} implementing the routing logic.
+  \item Add a branch in \texttt{\_insert\_after\_serve} specifying the eviction algorithm (or reuse \texttt{add\_lru}/\texttt{add\_lfu}/\texttt{add\_ice\_style}).
+  \item Register the policy name in \texttt{configs/simulation\_config.json} under \texttt{"policies"}.
+\end{enumerate}
+
+\subsubsection{Custom DRL Hook}
+
+Any callable matching the signature
+\begin{lstlisting}[language=Python]
+def my_hook(node, content, latency, deadline_ms,
+            candidate_nodes, all_nodes) -> int:
+    ...  # return 0, 1, or 2
+\end{lstlisting}
+can be passed as \texttt{drl\_hook} to \texttt{run\_simulation}. This enables integration of alternative RL frameworks (e.g., stable-baselines3) without modifying the simulator core.
+
+\subsubsection{Programmatic API}
+
+\begin{lstlisting}[language=Python]
+from sim.simulator import build_world, run_simulation
+from experiments.runner import load_config
+
+config = load_config("configs/simulation_config.json")
+world = build_world(seed=42, config=config)
+
+# Evaluate LRU
+metrics = run_simulation("LRU", seed=42, config=config, world=world)
+print(metrics.to_row())
+
+# Evaluate another policy on the exact same world
+metrics2 = run_simulation("LFU", seed=42, config=config, world=world)
+\end{lstlisting}
+
+Note that \texttt{run\_simulation} modifies the cache state of the nodes in \texttt{world} as a side effect. If multiple policies need to be compared on the same world without cross-contamination, build a fresh world for each policy (which is what \texttt{run\_multi\_seed} does). The current design allows world reuse only when the researcher explicitly wants stateful carryover between policy comparisons.
+
+\subsection{Reproducibility Checklist}
+
+\begin{itemize}[noitemsep]
+  \item All random draws inside \texttt{build\_world} use a single \texttt{random.Random(seed)} instance; no global random state is mutated.
+  \item The simulation run-time RNG is seeded as \texttt{seed $\times$ 1\,000\,003 + 17} to be independent of the world-building RNG.
+  \item PyTorch operations (DQN forward and backward pass) are \emph{not} seeded by the simulator; for bit-exact DRL reproducibility, set \texttt{torch.manual\_seed(seed)} before calling \texttt{train\_drl\_agents}.
+  \item The load-noise jitter ($5 \times 10^{-3}$ amplitude) is seeded by the run-time RNG and is therefore fully reproducible given the seed.
+\end{itemize}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+EdgeSim-DCCC provides a complete, reproducible, and extensible Python simulation environment for deadline-aware cooperative edge caching research. Its key contributions as a simulator framework are:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Paired world isolation}: every policy for a given seed processes the same request stream from the same initial cache state, making cross-policy comparisons statistically clean.
+  \item \textbf{Newton-cooling popularity}: a dynamic popularity model that combines Zipf-distributed base popularity with a request-demand signal and time decay, producing realistic cache-eviction pressure over the course of a simulation run.
+  \item \textbf{Two-tier deadline routing}: strict ($D_1 = 35$\,ms) and cooperative ($D_2 = 95$\,ms) deadline tiers mirror real MEC deployment constraints and create meaningful routing trade-offs that challenge both heuristic and learned policies.
+  \item \textbf{Decoupled DRL integration}: the \texttt{drl\_hook} callback design keeps the simulator usable without PyTorch for ablation and baseline studies, while supporting full DQN training through the same loop with zero simulator changes.
+  \item \textbf{Statistical evaluation out-of-the-box}: the harness automatically runs 5-seed paired t-tests and Wilcoxon signed-rank tests, reducing researcher overhead and preventing $p$-hacking through a fixed test protocol.
+\end{enumerate}
+
+Future extensions planned for the framework include: a federated learning mode where agents share gradients across nodes, a streaming request model where popularity drifts mid-run, network topology graphs replacing the flat region model, and a REST API for real-time dashboard monitoring of simulation runs.
+
+The simulator is available as an open-source project. All results presented in associated papers can be reproduced by running \texttt{python main.py} with the default configuration.
+
+\appendix
+
+\section{Module Index}
+\label{app:modules}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Module path} & \textbf{Public API} \\
+\midrule
+\texttt{sim/simulator.py} & \texttt{build\_world}, \texttt{run\_simulation}, \texttt{edge\_latency\_ms} \\
+\texttt{models/content.py} & \texttt{Content} dataclass \\
+\texttt{models/edge\_node.py} & \texttt{EdgeNode}: \texttt{add\_lru}, \texttt{add\_lfu}, \texttt{add\_ice\_style} \\
+\texttt{models/request.py} & \texttt{Request} dataclass \\
+\texttt{policies/deadline\_dccc\_policy.py} & \texttt{newton\_popularity}, \texttt{common\_overlap}, \texttt{deadline\_aware\_score} \\
+\texttt{drl/dqn\_agent.py} & \texttt{DQNAgent}, \texttt{DQNNetwork} \\
+\texttt{drl/trainer.py} & \texttt{train\_drl\_agents}, \texttt{make\_eval\_hook}, \texttt{build\_drl\_state} \\
+\texttt{drl/replay\_buffer.py} & \texttt{ReplayBuffer} \\
+\texttt{experiments/runner.py} & \texttt{run\_multi\_seed}, \texttt{load\_config} \\
+\texttt{experiments/stats.py} & \texttt{mean\_ci95}, \texttt{paired\_t\_pvalue}, \texttt{wilcoxon\_signed\_rank\_pvalue} \\
+\texttt{main.py} & \texttt{main()} CLI entry point \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Policy Summary Table}
+\label{app:policies}
+
+\begin{center}
+\begin{tabular}{lllll}
+\toprule
+\textbf{Policy} & \textbf{Node selection} & \textbf{Coop. lookup} & \textbf{Eviction} & \textbf{DRL} \\
+\midrule
+LRU & Nearest latency & No & LRU & No \\
+LFU & Nearest latency & No & LFU & No \\
+DCCC\_HASH & Hash ($c \bmod N_n$) & Yes ($\leq D_2$) & ICE & No \\
+DCCC\_NEAREST & Min latency & Yes ($\leq D_2$) & ICE & No \\
+DEADLINE\_HEURISTIC & Max $S(j)$ & Yes ($\leq D_2$) & ICE & No \\
+DEADLINE\_NO\_OVERLAP & Max $S(j)$, $w_o = 0$ & Yes ($\leq D_2$) & ICE & No \\
+DEADLINE\_DCCC & Max $S(j)$ + DRL override & Yes ($\leq D_2$) & ICE & Yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}

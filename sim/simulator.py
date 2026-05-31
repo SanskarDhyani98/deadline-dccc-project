@@ -113,10 +113,15 @@ def _weighted_choice(rng: random.Random, weights: List[float]) -> int:
 
 def _generate_contents(rng: random.Random, config: dict) -> List[Content]:
     contents: List[Content] = []
+    size_min = config.get("content_size_min_mb", 50)
+    size_max = config.get("content_size_max_mb", 2500)
+    zipf_exp = config.get("zipf_exponent", 0.85)
+    bias_min = config.get("region_bias_min", 0.1)
+    bias_max = config.get("region_bias_max", 1.0)
     for cid in range(config["num_contents"]):
-        size = rng.randint(50, 2500)
-        base_popularity = 1.0 / ((cid + 1) ** 0.85)
-        region_bias = [round(rng.uniform(0.1, 1.0), 2) for _ in range(config["num_regions"])]
+        size = rng.randint(size_min, size_max)
+        base_popularity = 1.0 / ((cid + 1) ** zipf_exp)
+        region_bias = [round(rng.uniform(bias_min, bias_max), 2) for _ in range(config["num_regions"])]
         content_type = rng.choice(config["content_types"])
         contents.append(
             Content(
@@ -141,28 +146,32 @@ def _generate_nodes(config: dict) -> List[EdgeNode]:
     ]
 
 
-def _seed_initial_distribution(contents: List[Content], nodes: List[EdgeNode]) -> None:
+def _seed_initial_distribution(
+    contents: List[Content], nodes: List[EdgeNode], config: dict | None = None
+) -> None:
     """Original DCCC-hash seed distribution.
 
     Used as the starting point for *every* policy so all start with the
     same cache state. Subsequent evictions follow the policy under test.
     """
+    threshold = (config or {}).get("secondary_cache_threshold", 0.25)
     for content in contents:
         primary = nodes[content.content_id % len(nodes)]
         primary.add_content(content.content_id, content.size_mb)
-        if content.base_popularity > 0.25:
+        if content.base_popularity > threshold:
             secondary = nodes[(content.content_id + 1) % len(nodes)]
             secondary.add_content(content.content_id, content.size_mb)
 
 
 def _generate_requests(rng: random.Random, contents: List[Content], config: dict) -> List[Request]:
     region_weights = config.get("region_request_weights") or [1.0] * config["num_regions"]
+    region_weight_mult = config.get("region_weight_multiplier", 2.5)
     deadline = config["strict_deadline_ms"]
     requests: List[Request] = []
     for rid in range(config["num_requests"]):
         user_region = _weighted_choice(rng, region_weights)
         weights = [
-            content.base_popularity * (1 + 2.5 * content.region_bias[user_region])
+            content.base_popularity * (1 + region_weight_mult * content.region_bias[user_region])
             for content in contents
         ]
         selected = contents[_weighted_choice(rng, weights)]
@@ -187,7 +196,7 @@ def build_world(seed: int, config: dict) -> World:
     rng = random.Random(seed)
     contents = _generate_contents(rng, config)
     nodes = _generate_nodes(config)
-    _seed_initial_distribution(contents, nodes)
+    _seed_initial_distribution(contents, nodes, config)
     requests = _generate_requests(rng, contents, config)
     content_map = {c.content_id: c for c in contents}
     return World(contents=contents, nodes=nodes, requests=requests, content_map=content_map)
@@ -195,8 +204,8 @@ def build_world(seed: int, config: dict) -> World:
 
 def edge_latency_ms(node: EdgeNode, content: Content, user_region: int, config: dict) -> float:
     transfer = config["transfer_ms_per_mb"] * content.size_mb
-    load_delay = 10.0 * node.load
-    region_delay = abs(node.region - user_region) * 4.0
+    load_delay = config.get("load_delay_ms", 10.0) * node.load
+    region_delay = abs(node.region - user_region) * config.get("region_delay_ms_per_hop", 4.0)
     return config["base_edge_latency_ms"] + transfer + load_delay + region_delay
 
 
@@ -234,6 +243,7 @@ def _select_node(
                 d1_ms=d1_ms,
                 common_overlap_ratio=overlap,
                 drop_overlap=drop_overlap,
+                config=config,
             )
             if score > best_score:
                 best_score = score
@@ -264,6 +274,7 @@ def _insert_after_serve(
     popularity: float,
     time_step: int,
     hit_type: str,
+    config: dict | None = None,
 ) -> int:
     if policy == LRU_POLICY:
         return cache_target.add_lru(content, time_step)
@@ -271,7 +282,8 @@ def _insert_after_serve(
         return cache_target.add_lfu(content, time_step)
     # All DCCC/deadline policies use ICE-style insertion, gated to avoid
     # blindly replicating already-hot edge hits.
-    should_cache = hit_type != "edge" or popularity * math.log1p(content.size_mb) > 0.6
+    ice_gate = (config or {}).get("ice_cache_gate", 0.6)
+    should_cache = hit_type != "edge" or popularity * math.log1p(content.size_mb) > ice_gate
     if not should_cache:
         return 0
     return cache_target.add_ice_style(content, time_step, popularity)
@@ -325,16 +337,18 @@ def run_simulation(
     for time_step, request in enumerate(world.requests):
         content = content_map[request.content_id]
         request_counts[content.content_id] += 1
-        popularity = newton_popularity(content, time_step, request_counts[content.content_id])
+        popularity = newton_popularity(content, time_step, request_counts[content.content_id], config=config)
 
         # Decay loads. Add tiny stochastic jitter so two policies with
         # identical routing don't become bit-identical (research figures
         # need a touch of variance to plot error bars over).
+        load_noise_amplitude = config.get("load_noise_amplitude", 0.005)
         for node in nodes:
-            node.load = max(0.0, node.load * load_decay + rng.random() * 0.005)
+            node.load = max(0.0, node.load * load_decay + rng.random() * load_noise_amplitude)
 
+        cross_region_prob = config.get("cross_region_prob", 0.35)
         candidate_nodes = [
-            n for n in nodes if n.region == request.user_region or rng.random() < 0.35
+            n for n in nodes if n.region == request.user_region or rng.random() < cross_region_prob
         ]
         if not candidate_nodes:
             candidate_nodes = [min(nodes, key=lambda n: abs(n.region - request.user_region))]
@@ -396,10 +410,12 @@ def run_simulation(
             popularity=popularity,
             time_step=time_step,
             hit_type=hit_type,
+            config=config,
         )
 
+        max_node_load = config.get("max_node_load", 1.5)
         if hit_type != "cloud":
-            serving_node.load = min(1.5, serving_node.load + load_inc)
+            serving_node.load = min(max_node_load, serving_node.load + load_inc)
             metrics.serves_per_node[serving_node.node_id] += 1
 
         if hit_type == "edge":

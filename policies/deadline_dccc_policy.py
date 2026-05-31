@@ -34,6 +34,7 @@ def newton_popularity(
     time_step: int,
     request_count: int,
     cooling_lambda: float = 0.0004,
+    config: dict | None = None,
 ) -> float:
     """Newton-cooling-inspired popularity.
 
@@ -41,8 +42,17 @@ def newton_popularity(
     count and a time-decay term so that historically popular but currently
     cold content cools off and is eventually evicted by the ICE-style
     reward.
+
+    If *config* is provided, ``cooling_lambda`` and
+    ``popularity_request_scale`` are read from it (falling back to their
+    parameter defaults when the keys are absent).
     """
-    request_impact = request_count / 20.0
+    if config is not None:
+        cooling_lambda = config.get("cooling_lambda", cooling_lambda)
+        request_scale = config.get("popularity_request_scale", 20.0)
+    else:
+        request_scale = 20.0
+    request_impact = request_count / request_scale
     return (content.base_popularity + request_impact) * math.exp(-cooling_lambda * time_step)
 
 
@@ -75,28 +85,47 @@ def deadline_aware_score(
     d1_ms: float,
     common_overlap_ratio: float,
     drop_overlap: bool = False,
+    config: dict | None = None,
 ) -> float:
     """Deadline-aware DCCC node-selection score (higher is better).
 
     Terms:
-      + 2.0 popularity           reward serving popular content from edge
-      + 6.0 hit_chance           strongly prefer nodes that already cache it
-      - 0.5 common_overlap       discourage duplicated caching
-      - 0.08 latency_ms          prefer faster paths
-      - 1.2 load**2              non-linear: penalise saturation, not utilisation
-      - 0.4 deadline_risk        penalise paths likely to miss d1
+      + score_w_popularity  popularity      reward serving popular content from edge
+      + score_w_hit_chance  hit_chance      strongly prefer nodes that already cache it
+      - score_w_overlap     common_overlap  discourage duplicated caching
+      - score_w_latency     latency_ms      prefer faster paths
+      - score_w_load_sq     load**2         non-linear: penalise saturation, not utilisation
+      - score_w_deadline_risk deadline_risk penalise paths likely to miss d1
 
     ``drop_overlap`` is used by the DEADLINE_NO_OVERLAP ablation only.
+
+    If *config* is provided, weight values are read from it (falling back to
+    the current hardcoded defaults when keys are absent).
     """
+    if config is not None:
+        w_popularity = config.get("score_w_popularity", 2.0)
+        w_hit_chance = config.get("score_w_hit_chance", 6.0)
+        w_overlap = config.get("score_w_overlap", 0.5)
+        w_latency = config.get("score_w_latency", 0.08)
+        w_load_sq = config.get("score_w_load_sq", 1.2)
+        w_deadline_risk = config.get("score_w_deadline_risk", 0.4)
+    else:
+        w_popularity = 2.0
+        w_hit_chance = 6.0
+        w_overlap = 0.5
+        w_latency = 0.08
+        w_load_sq = 1.2
+        w_deadline_risk = 0.4
+
     hit_chance = 1.0 if node.has_content(content.content_id) else min(0.5, popularity)
     deadline_risk = max(0.0, latency_ms - d1_ms)
-    overlap_term = 0.0 if drop_overlap else 0.5 * common_overlap_ratio
+    overlap_term = 0.0 if drop_overlap else w_overlap * common_overlap_ratio
 
     return (
-        2.0 * popularity
-        + 6.0 * hit_chance
+        w_popularity * popularity
+        + w_hit_chance * hit_chance
         - overlap_term
-        - 0.08 * latency_ms
-        - 1.2 * (node.load ** 2)
-        - 0.4 * deadline_risk
+        - w_latency * latency_ms
+        - w_load_sq * (node.load ** 2)
+        - w_deadline_risk * deadline_risk
     )
