@@ -5,6 +5,7 @@
 
 \usepackage[a4paper, top=25mm, bottom=25mm, left=25mm, right=25mm]{geometry}
 \usepackage{amsmath, amssymb}
+\usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
@@ -20,6 +21,7 @@
 \usepackage{tabularx}
 \usepackage{longtable}
 \usepackage{setspace}
+\setlength{\emergencystretch}{3em}
 
 % Hyperref configuration
 \hypersetup{
@@ -126,7 +128,7 @@ EdgeSim-DCCC is organised into six top-level packages. Figure~\ref{fig:arch} sum
 \textbf{Module dependency and data-flow diagram}
 
 \medskip
-\small
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{|l|l|l|}
 \hline
 \textbf{Package} & \textbf{Key module} & \textbf{Responsibility} \\
@@ -138,8 +140,8 @@ EdgeSim-DCCC is organised into six top-level packages. Figure~\ref{fig:arch} sum
 \texttt{experiments/} & \texttt{runner.py}, \texttt{stats.py} & Multi-seed harness \\
 \texttt{configs/} & \texttt{simulation\_config.json} & 59-key parameter store \\
 \hline
-\end{tabular}
-\caption{Module responsibilities. Arrows in the dependency graph flow from consumer to provider: \texttt{runner} $\to$ \texttt{simulator} $\to$ \texttt{models}, \texttt{policies}; \texttt{trainer} $\to$ \texttt{simulator}, \texttt{dqn\_agent}; \texttt{main} $\to$ \texttt{runner}.}
+\end{tabular}}
+\caption{Module responsibilities and dependency graph (consumer $\to$ provider).}
 \label{fig:arch}
 \end{figure}
 
@@ -177,7 +179,7 @@ The Zipf exponent $\alpha = 0.85$ produces a moderately heavy-tailed distributio
 
 \subsection{Edge Node Topology}
 
-Five edge nodes are created with a heterogeneous capacity profile $[9000, 9000, 2700, 9000, 2700]$\,MB. Each node is assigned a region $r_j = j \bmod N_r$, spreading the five nodes across the three regions $(0, 1, 2)$.
+Five edge nodes are created with heterogeneous capacities: nodes 0, 1, 3 hold 9000\,MB each; nodes 2 and 4 hold 2700\,MB each. Each node is assigned a region $r_j = j \bmod N_r$, spreading the five nodes across the three regions $(0, 1, 2)$.
 
 \subsubsection{Initial Cache Distribution}
 
@@ -298,8 +300,7 @@ where $\alpha_{\text{local}} = 0.02$ for edge and cooperative serves and $\alpha
 
 The \texttt{SimMetrics.to\_row()} method produces the following columns per (policy, seed) replication:
 
-\begin{center}
-\begin{tabular}{lll}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
 \toprule
 \textbf{Metric} & \textbf{Formula} & \textbf{Better} \\
 \midrule
@@ -315,8 +316,7 @@ avg\_energy & $\bar{e}$ & $\downarrow$ \\
 cache\_evictions & $\sum \text{evictions}$ & $\downarrow$ \\
 load\_imbalance & $\max(\text{serves}_j) / \bar{\text{serves}}$ & $\downarrow$ \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \section{Policy Framework}
 \label{sec:policies}
@@ -379,7 +379,7 @@ Selects the node maximising the deadline-aware score $S(j, i, r_u, t)$ (Section~
 
 \subsubsection{DEADLINE\_NO\_OVERLAP}
 
-Identical to DEADLINE\_HEURISTIC except the $w_{\text{overlap}}$ term is dropped (\texttt{drop\_overlap=True}). This ablation tests whether the soft cache-partitioning incentive in the overlap term is beneficial.
+Identical to DEADLINE\_HEURISTIC except the $w_{\text{overlap}}$ term is dropped (flag \texttt{drop\_overlap} set to \texttt{True}). This ablation tests whether the soft cache-partitioning incentive in the overlap term is beneficial.
 
 \subsubsection{DEADLINE\_DCCC}
 
@@ -443,8 +443,7 @@ The edge caching routing problem is formulated as a Partially Observable Markov 
 
 At each request routed to node $j$, the agent for node $j$ observes:
 
-\begin{center}
-\begin{tabular}{clll}
+\begin{tabularx}{\linewidth}{@{}c l l X@{}}
 \toprule
 \textbf{Dim} & \textbf{Feature} & \textbf{Formula} & \textbf{Range} \\
 \midrule
@@ -456,8 +455,7 @@ At each request routed to node $j$, the agent for node $j$ observes:
 5 & Cache overlap ratio & $\text{overlap}(j, \mathcal{N}_c)$ & $[0, 1]$ \\
 6 & Deadline slack (normalised) & $\max(0, L_j - D_1) / 200$ & $[0, 1]$ \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 Dimension 2 is the single most informative feature: if the agent's node already holds the content, serving locally is almost always optimal unless the node is heavily loaded. Dimension 6 directly encodes the degree to which a local serve would violate the deadline, pushing the agent towards cooperative or default forwarding when the deadline is at risk.
 
@@ -605,8 +603,7 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 
 \subsection{Network and Topology}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
@@ -616,13 +613,11 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 \texttt{cache\_capacity\_mb} & int & 9000 & Default per-node capacity (MB) \\
 \texttt{capacity\_profile} & list[int] & [9000,9000,2700,9000,2700] & Per-node capacity (overrides default) \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{Traffic Model}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
@@ -637,13 +632,11 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 \texttt{region\_bias\_max} & float & 1.0 & Max value for per-region bias draw \\
 \texttt{content\_types} & list[str] & [video,image,iot,audio] & Content type vocabulary \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{Latency and Deadline}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
@@ -661,13 +654,11 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 \texttt{load\_decay} & float & 0.90 & Per-step load decay multiplier \\
 \texttt{load\_noise\_amplitude} & float & 0.005 & Stochastic jitter on load decay \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{Cache Management}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
@@ -676,13 +667,11 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 \texttt{cooling\_lambda} & float & 0.0004 & Newton-cooling decay rate $\lambda$ \\
 \texttt{popularity\_request\_scale} & float & 20.0 & Demand normaliser $\sigma$ in Newton popularity \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{Deadline-Aware Score Weights}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
@@ -693,26 +682,22 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 \texttt{score\_w\_load\_sq} & float & 1.2 & Weight $w_{\ell^2}$ for quadratic load penalty \\
 \texttt{score\_w\_deadline\_risk} & float & 0.4 & Weight $w_r$ for deadline-risk penalty \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{Energy Model}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
 \texttt{energy\_local\_factor} & float & 0.02 & Energy coefficient for edge/coop serve (per MB) \\
 \texttt{energy\_cloud\_factor} & float & 0.09 & Energy coefficient for cloud fetch (per MB) \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{DRL Hyperparameters}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
@@ -729,13 +714,11 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 \texttt{train\_requests\_per\_episode} & int & 1000 & Requests used per training episode \\
 \texttt{eval\_requests} & int & 6000 & Requests used in evaluation run \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{Reward Shaping}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
@@ -745,21 +728,18 @@ All 59 parameters are stored in \texttt{configs/simulation\_config.json}. Every 
 \texttt{reward\_latency\_coef} & float & 0.03 & Per-ms latency penalty coefficient \\
 \texttt{reward\_deadline\_bonus} & float & 5.0 & Bonus/penalty for meeting/missing deadline \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \subsection{Experiment Harness}
 
-\begin{center}
-\begin{tabular}{llll}
+\begin{tabularx}{\linewidth}{@{}l l l X@{}}
 \toprule
 \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
 \texttt{seeds} & list[int] & [42,43,44,45,46] & Random seeds for multi-seed evaluation \\
 \texttt{policies} & list[str] & (all 7 policies) & Policies included in experiment matrix \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \section{Reproducibility and Usage}
 \label{sec:repro}
@@ -937,7 +917,7 @@ The simulator is available as an open-source project. All results presented in a
 \section{Module Index}
 \label{app:modules}
 
-\begin{center}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{ll}
 \toprule
 \textbf{Module path} & \textbf{Public API} \\
@@ -954,14 +934,12 @@ The simulator is available as an open-source project. All results presented in a
 \texttt{experiments/stats.py} & \texttt{mean\_ci95}, \texttt{paired\_t\_pvalue}, \texttt{wilcoxon\_signed\_rank\_pvalue} \\
 \texttt{main.py} & \texttt{main()} CLI entry point \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabular}}
 
 \section{Policy Summary Table}
 \label{app:policies}
 
-\begin{center}
-\begin{tabular}{lllll}
+\begin{tabularx}{\linewidth}{@{}l l l l X@{}}
 \toprule
 \textbf{Policy} & \textbf{Node selection} & \textbf{Coop. lookup} & \textbf{Eviction} & \textbf{DRL} \\
 \midrule
@@ -973,7 +951,6 @@ DEADLINE\_HEURISTIC & Max $S(j)$ & Yes ($\leq D_2$) & ICE & No \\
 DEADLINE\_NO\_OVERLAP & Max $S(j)$, $w_o = 0$ & Yes ($\leq D_2$) & ICE & No \\
 DEADLINE\_DCCC & Max $S(j)$ + DRL override & Yes ($\leq D_2$) & ICE & Yes \\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
 
 \end{document}

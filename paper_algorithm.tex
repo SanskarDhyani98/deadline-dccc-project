@@ -16,6 +16,7 @@
 \usepackage{cite}
 \usepackage{array}
 \usepackage{multirow}
+\setlength{\emergencystretch}{3em}
 
 \hypersetup{
   colorlinks=true,
@@ -422,16 +423,17 @@ The core contribution of this paper is the \emph{deadline-aware
 scoring function} used to select the best edge node for each request.
 For node $n$, content $c$, and user region $u$, the score is:
 
-\begin{equation}
-  \sigma(n, c, u) =
+\begin{align}
+  \sigma(n, c, u) &=
     \underbrace{2.0 \cdot p_c(t)}_{\text{popularity}}
     + \underbrace{6.0 \cdot \chi(n, c)}_{\text{cache hit}}
-    - \underbrace{0.5 \cdot \Omega_n}_{\text{overlap}}
+    - \underbrace{0.5 \cdot \Omega_n}_{\text{overlap}} \nonumber \\
+    &\quad
     - \underbrace{0.08 \cdot \ell(n,c,u)}_{\text{latency}}
     - \underbrace{1.2 \cdot \mathrm{load}(n)^2}_{\text{load}}
     - \underbrace{0.4 \cdot \delta(n,c,u)}_{\text{deadline risk}},
   \label{eq:score}
-\end{equation}
+\end{align}
 
 where:
 \begin{itemize}
